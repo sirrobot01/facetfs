@@ -54,6 +54,11 @@ func New(ctx context.Context, config Config) (*Server, error) {
 		if !caps.StableObjectIDs {
 			return nil, fmt.Errorf("facetfs: export %q: stable object IDs are required", export.ID)
 		}
+		if !caps.ReadOnly {
+			if _, ok := export.Backend.(MutableBackend); !ok {
+				return nil, fmt.Errorf("facetfs: export %q: writable backend does not implement facetfs.MutableBackend", export.ID)
+			}
+		}
 		if caps.ReadOnly {
 			export.ReadOnly = true
 		}

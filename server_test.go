@@ -9,6 +9,8 @@ type stubBackend struct {
 	caps Capabilities
 }
 
+type baseBackend struct{ Backend }
+
 func (b stubBackend) Capabilities(context.Context) (Capabilities, error) { return b.caps, nil }
 func (stubBackend) Root(context.Context, Request, string) (ObjectRef, Attr, error) {
 	return ObjectRef{}, Attr{}, ErrNotSupported
@@ -74,6 +76,22 @@ func TestNewValidatesAndSnapshotsExports(t *testing.T) {
 	caps, ok := server.Capabilities("media")
 	if !ok || !caps.StableObjectIDs {
 		t.Fatalf("Capabilities() = %#v, %v", caps, ok)
+	}
+}
+
+func TestNewAcceptsReadOnlyBackend(t *testing.T) {
+	t.Parallel()
+	backend := baseBackend{Backend: stubBackend{caps: Capabilities{ReadOnly: true, StableObjectIDs: true}}}
+	if _, err := New(t.Context(), Config{Exports: []Export{{ID: "data", Name: "Data", Backend: backend}}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestNewRejectsIncompleteWritableBackend(t *testing.T) {
+	t.Parallel()
+	backend := baseBackend{Backend: stubBackend{caps: Capabilities{StableObjectIDs: true}}}
+	if _, err := New(t.Context(), Config{Exports: []Export{{ID: "data", Name: "Data", Backend: backend}}}); err == nil {
+		t.Fatal("New() accepted a writable backend without mutation support")
 	}
 }
 

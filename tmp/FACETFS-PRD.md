@@ -521,25 +521,33 @@ type Backend interface {
     ReadDir(ctx context.Context, req Request, dir ObjectRef, cursor DirCursor, max int) (DirPage, error)
 
     Open(ctx context.Context, req Request, object ObjectRef, options OpenOptions) (Handle, error)
+    Readlink(ctx context.Context, req Request, object ObjectRef) (string, error)
+    StatFS(ctx context.Context, req Request, object ObjectRef) (FSStat, error)
+}
+
+type MutableBackend interface {
+    Backend
     Create(ctx context.Context, req Request, parent ObjectRef, name string, options CreateOptions) (ObjectRef, Handle, Attr, error)
     Mkdir(ctx context.Context, req Request, parent ObjectRef, name string, attr SetAttr) (ObjectRef, Attr, error)
     Symlink(ctx context.Context, req Request, parent ObjectRef, name, target string, attr SetAttr) (ObjectRef, Attr, error)
-    Readlink(ctx context.Context, req Request, object ObjectRef) (string, error)
     Link(ctx context.Context, req Request, object, newParent ObjectRef, newName string) error
     Remove(ctx context.Context, req Request, parent ObjectRef, name string, expect RemoveKind) error
     Rename(ctx context.Context, req Request, oldParent ObjectRef, oldName string, newParent ObjectRef, newName string, options RenameOptions) error
     SetAttr(ctx context.Context, req Request, object ObjectRef, attr SetAttr) (Attr, error)
-    StatFS(ctx context.Context, req Request, object ObjectRef) (FSStat, error)
 }
 
 type Handle interface {
     ID() string
     Object() ObjectRef
     ReadAt(ctx context.Context, p []byte, off int64) (int, error)
+    Close(ctx context.Context) error
+}
+
+type MutableHandle interface {
+    Handle
     WriteAt(ctx context.Context, p []byte, off int64) (int, error)
     Flush(ctx context.Context, stable bool) error
     SetAttr(ctx context.Context, attr SetAttr) (Attr, error)
-    Close(ctx context.Context) error
 }
 ```
 

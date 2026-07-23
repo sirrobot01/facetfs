@@ -16,6 +16,8 @@ import (
 
 const maxFileSize = 64 << 20
 
+var _ facetfs.MutableBackend = (*FS)(nil)
+
 type node struct {
 	id         facetfs.NodeID
 	generation uint64

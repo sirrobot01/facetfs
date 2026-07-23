@@ -18,6 +18,8 @@ type file struct {
 	closed atomic.Bool
 }
 
+var _ facetfs.MutableHandle = (*file)(nil)
+
 func (f *FS) Open(ctx context.Context, _ facetfs.Request, object facetfs.ObjectRef, options facetfs.OpenOptions) (facetfs.Handle, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
