@@ -1,5 +1,7 @@
 package facetfs
 
+import "slices"
+
 // Export binds a stable external identity to a backend root. An empty
 // Protocols list makes the export visible to every enabled frontend.
 type Export struct {
@@ -10,15 +12,18 @@ type Export struct {
 	Protocols []Protocol
 }
 
+type ExportInfo struct {
+	ID           string
+	Name         string
+	ReadOnly     bool
+	Protocols    []Protocol
+	Capabilities Capabilities
+}
+
 // Supports reports whether this export is visible through protocol.
 func (e Export) Supports(protocol Protocol) bool {
 	if len(e.Protocols) == 0 {
 		return true
 	}
-	for _, candidate := range e.Protocols {
-		if candidate == protocol {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(e.Protocols, protocol)
 }

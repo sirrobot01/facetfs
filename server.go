@@ -4,20 +4,24 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 )
 
 var exportIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // Config contains the protocol-neutral server configuration.
 type Config struct {
-	Exports []Export
+	Exports    []Export
+	Authorizer Authorizer
 }
 
 // Server is the shared FacetFS runtime. Protocol registration and serving will
 // be added with the coordinator during Phase 1.
 type Server struct {
 	exports      []Export
+	byID         map[string]Export
 	capabilities map[string]Capabilities
+	authorizer   Authorizer
 }
 
 // New validates export identities and snapshots backend capabilities.
@@ -26,8 +30,12 @@ func New(ctx context.Context, config Config) (*Server, error) {
 		return nil, fmt.Errorf("facetfs: at least one export is required")
 	}
 
-	exports := cloneExports(config.Exports)
+	exports := slices.Clone(config.Exports)
+	for i := range exports {
+		exports[i].Protocols = slices.Clone(exports[i].Protocols)
+	}
 	capabilities := make(map[string]Capabilities, len(exports))
+	byID := make(map[string]Export, len(exports))
 	seen := make(map[string]struct{}, len(exports))
 	for i := range exports {
 		export := &exports[i]
@@ -63,26 +71,36 @@ func New(ctx context.Context, config Config) (*Server, error) {
 			export.ReadOnly = true
 		}
 		capabilities[export.ID] = caps
+		byID[export.ID] = *export
 	}
-
-	return &Server{exports: exports, capabilities: capabilities}, nil
+	authorizer := config.Authorizer
+	if authorizer == nil {
+		authorizer = AuthorizerFunc(func(_ context.Context, request Request, _ AccessCheck) error {
+			if request.Principal.Subject == "" {
+				return ErrAuthenticationRequired
+			}
+			return ErrAccessDenied
+		})
+	}
+	return &Server{exports: exports, byID: byID, capabilities: capabilities, authorizer: authorizer}, nil
 }
 
-// Exports returns a copy of the configured exports.
-func (s *Server) Exports() []Export {
+// Exports returns export metadata without exposing backend implementations.
+func (s *Server) Exports() []ExportInfo {
 	if s == nil {
 		return nil
 	}
-	return cloneExports(s.exports)
-}
-
-func cloneExports(exports []Export) []Export {
-	cloned := make([]Export, len(exports))
-	copy(cloned, exports)
-	for i := range cloned {
-		cloned[i].Protocols = append([]Protocol(nil), exports[i].Protocols...)
+	exports := make([]ExportInfo, len(s.exports))
+	for i, export := range s.exports {
+		exports[i] = ExportInfo{
+			ID:           export.ID,
+			Name:         export.Name,
+			ReadOnly:     export.ReadOnly,
+			Protocols:    slices.Clone(export.Protocols),
+			Capabilities: s.capabilities[export.ID],
+		}
 	}
-	return cloned
+	return exports
 }
 
 // Capabilities returns the startup capability snapshot for an export.
@@ -97,9 +115,7 @@ func (s *Server) Capabilities(exportID string) (Capabilities, bool) {
 func validateProtocols(protocols []Protocol) error {
 	seen := make(map[Protocol]struct{}, len(protocols))
 	for _, protocol := range protocols {
-		switch protocol {
-		case ProtocolNFS4, ProtocolSMB, ProtocolSFTP, ProtocolWebDAV:
-		default:
+		if !knownProtocol(protocol) {
 			return fmt.Errorf("unknown protocol %q", protocol)
 		}
 		if _, exists := seen[protocol]; exists {
@@ -108,4 +124,13 @@ func validateProtocols(protocols []Protocol) error {
 		seen[protocol] = struct{}{}
 	}
 	return nil
+}
+
+func knownProtocol(protocol Protocol) bool {
+	switch protocol {
+	case ProtocolNFS4, ProtocolSMB, ProtocolSFTP, ProtocolWebDAV:
+		return true
+	default:
+		return false
+	}
 }

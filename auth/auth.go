@@ -1,43 +1,27 @@
-// Package auth defines protocol-neutral authorization hooks.
+// Package auth provides common FacetFS authorization policies.
 package auth
 
-import (
-	"context"
+import "github.com/sirrobot01/facetfs"
 
-	"github.com/sirrobot01/facetfs"
-)
-
-// Action is a canonical filesystem operation checked by an Authorizer.
-type Action string
+type Action = facetfs.Action
+type Check = facetfs.AccessCheck
+type Authorizer = facetfs.Authorizer
+type AuthorizerFunc = facetfs.AuthorizerFunc
 
 const (
-	ActionLookup Action = "lookup"
-	ActionRead   Action = "read"
-	ActionWrite  Action = "write"
-	ActionCreate Action = "create"
-	ActionRemove Action = "remove"
-	ActionRename Action = "rename"
-	ActionLock   Action = "lock"
+	ActionRoot     = facetfs.ActionRoot
+	ActionLookup   = facetfs.ActionLookup
+	ActionGetAttr  = facetfs.ActionGetAttr
+	ActionReadDir  = facetfs.ActionReadDir
+	ActionRead     = facetfs.ActionRead
+	ActionWrite    = facetfs.ActionWrite
+	ActionCreate   = facetfs.ActionCreate
+	ActionMkdir    = facetfs.ActionMkdir
+	ActionSymlink  = facetfs.ActionSymlink
+	ActionReadlink = facetfs.ActionReadlink
+	ActionLink     = facetfs.ActionLink
+	ActionRemove   = facetfs.ActionRemove
+	ActionRename   = facetfs.ActionRename
+	ActionSetAttr  = facetfs.ActionSetAttr
+	ActionStatFS   = facetfs.ActionStatFS
 )
-
-// Check contains the operation and objects involved in an authorization
-// decision. Name is set for namespace operations.
-type Check struct {
-	Action Action
-	Object facetfs.ObjectRef
-	Parent facetfs.ObjectRef
-	Name   string
-}
-
-// Authorizer evaluates access for every operation. A nil error allows access;
-// denial should use facetfs.ErrAccessDenied.
-type Authorizer interface {
-	Authorize(context.Context, facetfs.Request, Check) error
-}
-
-// AuthorizerFunc adapts a function to Authorizer.
-type AuthorizerFunc func(context.Context, facetfs.Request, Check) error
-
-func (f AuthorizerFunc) Authorize(ctx context.Context, req facetfs.Request, check Check) error {
-	return f(ctx, req, check)
-}
