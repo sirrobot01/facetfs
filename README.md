@@ -29,6 +29,108 @@ make build
 ./bin/facetfsd -version
 ```
 
+## Usage
+
+FacetFS applications assemble four pieces:
+
+1. a backend such as `backend/osfs` or `backend/memfs`;
+2. one or more exports;
+3. an application-owned authorizer;
+4. a WebDAV or SFTP frontend with its authentication callback.
+
+The default authorizer denies access, so applications must provide an explicit
+authorization policy. Frontend authentication establishes a `Principal`; the
+shared authorizer then decides which filesystem operations that principal may
+perform.
+
+### WebDAV
+
+The WebDAV frontend is an `http.Handler`, so it can be mounted in an existing
+HTTP server or behind a reverse proxy:
+
+```go
+handler, err := webdav.New(runtime, webdav.Options{
+    ExportID:     "data",
+    Prefix:       "/dav",
+    Authenticate: authenticateRequest,
+})
+if err != nil {
+    return err
+}
+
+httpServer := &http.Server{
+    Addr:              ":8443",
+    Handler:           handler,
+    ReadHeaderTimeout: 10 * time.Second,
+}
+return httpServer.ListenAndServeTLS("cert.pem", "key.pem")
+```
+
+`Authenticate` is application-defined and can establish identities from Basic
+authentication, bearer tokens, mTLS, or an existing session. Plaintext Basic
+authentication is rejected unless `AllowInsecureBasic` is explicitly enabled.
+
+### SFTP
+
+The SFTP frontend requires caller-supplied host keys and a public-key verifier:
+
+```go
+server, err := sftp.New(runtime, sftp.Options{
+    ExportID: "data",
+    HostKeys: hostKeys,
+    AuthenticatePublicKey: authenticatePublicKey,
+})
+if err != nil {
+    return err
+}
+
+listener, err := net.Listen("tcp", "127.0.0.1:2022")
+if err != nil {
+    return err
+}
+return server.Serve(ctx, listener)
+```
+
+Shell, exec, PTY, agent-forwarding, and TCP-forwarding requests are rejected.
+Only the SFTP subsystem is served.
+
+## Examples
+
+The examples export a local directory through the reference OS backend.
+
+Run the loopback WebDAV example:
+
+```sh
+mkdir -p ./shared
+FACETFS_USER=demo FACETFS_PASSWORD=change-me \
+  go run ./examples/webdav -root ./shared
+
+curl -u demo:change-me -T ./README.md http://127.0.0.1:8080/dav/README.md
+curl -u demo:change-me http://127.0.0.1:8080/dav/README.md
+```
+
+Plaintext mode is restricted to loopback. Supply `-tls-cert` and `-tls-key` for
+a TLS listener.
+
+Run the SFTP example:
+
+```sh
+mkdir -p ./shared
+ssh-keygen -t ed25519 -N '' -f ./facetfs_host_key
+cp ~/.ssh/id_ed25519.pub ./facetfs_authorized_keys
+
+go run ./examples/sftp \
+  -root ./shared \
+  -host-key ./facetfs_host_key \
+  -authorized-keys ./facetfs_authorized_keys
+
+sftp -P 2022 127.0.0.1
+```
+
+These programs are starting points for embedding. Production applications
+should provide durable host keys, TLS, authorization policy, operational
+timeouts, and logging appropriate to their environment.
+
 ## Goals
 
 - Pure Go with no CGO requirement
