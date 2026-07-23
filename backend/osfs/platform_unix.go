@@ -4,6 +4,8 @@ package osfs
 
 import (
 	"errors"
+	"io/fs"
+	"os"
 	"runtime"
 	"syscall"
 
@@ -13,7 +15,17 @@ import (
 const (
 	hardLinks = true
 	symlinks  = true
+	// modeOverlay is false: Unix filesystems store permission bits natively,
+	// so GetAttr reads them straight back from the host and no overlay is kept.
+	modeOverlay = false
 )
+
+// sysOpen opens path with the host's default sharing semantics, which already
+// allow renaming and removing open files. It exists so file.go can share one
+// call site with the Windows build, where a wider share mode is required.
+func sysOpen(path string, flag int, perm fs.FileMode) (*os.File, error) {
+	return os.OpenFile(path, flag, perm)
+}
 
 var caseSensitive = runtime.GOOS != "darwin"
 

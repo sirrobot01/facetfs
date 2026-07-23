@@ -22,6 +22,11 @@ type record struct {
 	paths      map[string]struct{}
 	open       uint64
 	revision   uint64
+	// mode overrides the permission bits reported by fileAttr when modeSet is
+	// true. It is only consulted on platforms that cannot store Unix modes
+	// natively (see modeOverlay), where the host filesystem loses the value.
+	mode    fs.FileMode
+	modeSet bool
 }
 
 type FS struct {
@@ -290,6 +295,19 @@ func (f *FS) changed(path string) {
 	record.info = info
 }
 
+// overrideMode records the permission bits a caller requested so fileAttr can
+// report them on platforms whose host filesystem cannot store Unix modes. It is
+// a no-op elsewhere, where the mode is read back from the host directly.
+func (f *FS) overrideMode(record *record, mode fs.FileMode) {
+	if !modeOverlay {
+		return
+	}
+	f.mu.Lock()
+	record.mode = mode
+	record.modeSet = true
+	f.mu.Unlock()
+}
+
 func (f *FS) changedRecord(record *record, info fs.FileInfo) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -326,9 +344,13 @@ func (f *FS) fileAttr(record *record, info fs.FileInfo) facetfs.Attr {
 	} else if info.Mode()&fs.ModeSymlink != 0 {
 		kind = facetfs.NodeTypeSymlink
 	}
+	mode := info.Mode()
 	f.mu.Lock()
 	links := uint32(len(record.paths))
 	revision := record.revision
+	if modeOverlay && record.modeSet {
+		mode = (mode &^ fs.ModePerm) | (record.mode & fs.ModePerm)
+	}
 	f.mu.Unlock()
 	if links == 0 {
 		links = 1
@@ -337,7 +359,7 @@ func (f *FS) fileAttr(record *record, info fs.FileInfo) facetfs.Attr {
 		Type:           kind,
 		Size:           info.Size(),
 		AllocationSize: info.Size(),
-		Mode:           info.Mode(),
+		Mode:           mode,
 		LinkCount:      links,
 		ModifiedAt:     info.ModTime(),
 		ChangedAt:      info.ModTime(),

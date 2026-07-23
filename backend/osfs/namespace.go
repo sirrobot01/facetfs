@@ -49,6 +49,9 @@ func (f *FS) Mkdir(ctx context.Context, _ facetfs.Request, parent facetfs.Object
 		return facetfs.ObjectRef{}, facetfs.Attr{}, mapError(err)
 	}
 	record := f.track(path, created)
+	if set.Mode != nil {
+		f.overrideMode(record, *set.Mode)
+	}
 	f.changed(parentPath)
 	return objectRef(parent.ExportID, record), f.fileAttr(record, created), nil
 }
@@ -234,6 +237,9 @@ func (f *FS) SetAttr(ctx context.Context, _ facetfs.Request, object facetfs.Obje
 	if err := f.apply(path, info, set); err != nil {
 		return facetfs.Attr{}, err
 	}
+	if set.Mode != nil {
+		f.overrideMode(record, *set.Mode)
+	}
 	info, err = os.Lstat(path)
 	if err != nil {
 		return facetfs.Attr{}, mapError(err)
@@ -266,5 +272,12 @@ func (f *FS) moved(oldPath, newPath string) {
 		delete(f.paths, path)
 		record.paths[replacement] = struct{}{}
 		f.paths[replacement] = record
+		// Refresh info so it carries the new path. os.SameFile reloads a
+		// FileInfo's identity by re-opening its stored path on Windows; a
+		// FileInfo left pointing at the pre-rename path would fail that
+		// comparison and make the object look stale after the rename.
+		if info, err := os.Lstat(replacement); err == nil {
+			record.info = info
+		}
 	}
 }
