@@ -36,7 +36,7 @@ The following illustrates the intended API. Frontend constructors and serving
 lifecycle will be implemented in later milestones.
 
 ```go
-srv, err := facetfs.New(facetfs.Config{
+srv, err := facetfs.New(ctx, facetfs.Config{
     Exports: []facetfs.Export{{
         ID:      "data",
         Name:    "Data",
@@ -70,6 +70,7 @@ The initial repository foundation includes:
 
 - core backend, handle, request, attribute, capability, and canonical-error
   contracts;
+- an in-memory backend and reusable backend contract tests;
 - export validation and capability snapshots;
 - package boundaries for the coordinator, reference backends, state,
   metadata, wire codecs, frontends, and daemon;

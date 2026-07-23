@@ -21,7 +21,7 @@ type Server struct {
 }
 
 // New validates export identities and snapshots backend capabilities.
-func New(config Config) (*Server, error) {
+func New(ctx context.Context, config Config) (*Server, error) {
 	if len(config.Exports) == 0 {
 		return nil, fmt.Errorf("facetfs: at least one export is required")
 	}
@@ -47,7 +47,7 @@ func New(config Config) (*Server, error) {
 		if err := validateProtocols(export.Protocols); err != nil {
 			return nil, fmt.Errorf("facetfs: export %q: %w", export.ID, err)
 		}
-		caps, err := export.Backend.Capabilities(context.Background())
+		caps, err := export.Backend.Capabilities(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("facetfs: export %q capabilities: %w", export.ID, err)
 		}

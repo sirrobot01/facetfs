@@ -1,3 +1,3 @@
-// Package testkit contains deterministic clocks, fault injection, protocol
-// fixtures, and the reusable backend contract suite.
+// Package testkit contains deterministic clocks, fault injection, and protocol
+// fixtures.
 package testkit

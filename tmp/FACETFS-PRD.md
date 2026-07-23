@@ -451,6 +451,7 @@ facetfs/
   metadata/           # protocol metadata sidecar interface
   backend/osfs/       # reference local filesystem backend
   backend/memfs/      # deterministic tests and examples
+  backendtest/        # reusable public backend contract suite
   nfs4/               # embeddable NFSv4 server
   smb/                # embeddable SMB2/3 server
   sftp/               # embeddable SSH/SFTP server
@@ -683,7 +684,7 @@ allocation. Request-controlled allocation MUST have a configured upper bound.
 ```go
 backend := osfs.New("/srv/media")
 
-srv, err := facetfs.New(facetfs.Config{
+srv, err := facetfs.New(ctx, facetfs.Config{
     StateStore: state,
     Authorizer: authorizer,
     Exports: []facetfs.Export{{

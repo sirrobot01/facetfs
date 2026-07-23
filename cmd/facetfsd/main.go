@@ -5,6 +5,7 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -31,5 +32,5 @@ func run(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "facetfsd %s\n", version)
 		return nil
 	}
-	return fmt.Errorf("facetfsd: no serving profile is implemented yet; use -version to inspect the build")
+	return errors.New("facetfsd: no serving profile is implemented yet; use -version to inspect the build")
 }

@@ -16,14 +16,13 @@ func TestCodeOf(t *testing.T) {
 	}{
 		{name: "nil", want: ""},
 		{name: "canonical", err: ErrNotFound, want: ErrNotFound},
-		{name: "wrapped", err: Error(ErrAccessDenied, "open", errors.New("private detail")), want: ErrAccessDenied},
+		{name: "wrapped", err: Wrap(ErrAccessDenied, "open", errors.New("private detail")), want: ErrAccessDenied},
 		{name: "canceled", err: context.Canceled, want: ErrCanceled},
 		{name: "deadline", err: context.DeadlineExceeded, want: ErrTimeout},
 		{name: "unknown", err: errors.New("boom"), want: ErrIO},
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			if got := CodeOf(test.err); got != test.want {
@@ -35,7 +34,7 @@ func TestCodeOf(t *testing.T) {
 
 func TestOpErrorMatchesCode(t *testing.T) {
 	t.Parallel()
-	err := Error(ErrNotFound, "lookup", errors.New("backend detail"))
+	err := Wrap(ErrNotFound, "lookup", errors.New("backend detail"))
 	if !errors.Is(err, ErrNotFound) {
 		t.Fatal("wrapped error does not match its canonical code")
 	}

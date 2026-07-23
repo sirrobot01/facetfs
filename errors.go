@@ -48,9 +48,6 @@ type OpError struct {
 }
 
 func (e *OpError) Error() string {
-	if e == nil {
-		return "<nil>"
-	}
 	if e.Op == "" {
 		return e.Code.Error()
 	}
@@ -64,8 +61,8 @@ func (e *OpError) Is(target error) bool {
 	return ok && e.Code == code
 }
 
-// Error wraps an internal cause with a canonical code and operation name.
-func Error(code ErrorCode, op string, cause error) error {
+// Wrap adds a canonical code and operation to an internal error.
+func Wrap(code ErrorCode, op string, cause error) error {
 	return &OpError{Code: code, Op: op, Cause: cause}
 }
 

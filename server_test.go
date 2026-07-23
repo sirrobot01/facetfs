@@ -56,7 +56,7 @@ func (stubBackend) StatFS(context.Context, Request, ObjectRef) (FSStat, error) {
 func TestNewValidatesAndSnapshotsExports(t *testing.T) {
 	t.Parallel()
 	backend := stubBackend{caps: Capabilities{StableObjectIDs: true, ReadOnly: true}}
-	server, err := New(Config{Exports: []Export{{
+	server, err := New(t.Context(), Config{Exports: []Export{{
 		ID: "media", Name: "Media", Backend: backend, Protocols: []Protocol{ProtocolWebDAV},
 	}}})
 	if err != nil {
@@ -98,10 +98,9 @@ func TestNewRejectsInvalidConfiguration(t *testing.T) {
 	}
 
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			if _, err := New(Config{Exports: test.exports}); err == nil {
+			if _, err := New(t.Context(), Config{Exports: test.exports}); err == nil {
 				t.Fatal("New() unexpectedly succeeded")
 			}
 		})
