@@ -39,7 +39,7 @@ func (f *FS) Open(ctx context.Context, _ facetfs.Request, object facetfs.ObjectR
 	if info.IsDir() && options.Access&facetfs.OpenWrite != 0 {
 		return nil, facetfs.ErrIsDirectory
 	}
-	opened, err := os.OpenFile(path, openFlags(options.Access), 0)
+	opened, err := sysOpen(path, openFlags(options.Access), 0)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -83,7 +83,7 @@ func (f *FS) Create(ctx context.Context, _ facetfs.Request, parent facetfs.Objec
 	if options.Attr.Mode != nil {
 		mode = *options.Attr.Mode
 	}
-	opened, err := os.OpenFile(path, flags, mode.Perm())
+	opened, err := sysOpen(path, flags, mode.Perm())
 	if err != nil {
 		return facetfs.ObjectRef{}, nil, facetfs.Attr{}, mapError(err)
 	}
@@ -105,6 +105,9 @@ func (f *FS) Create(ctx context.Context, _ facetfs.Request, parent facetfs.Objec
 			f.removed(path)
 		}
 		return facetfs.ObjectRef{}, nil, facetfs.Attr{}, err
+	}
+	if options.Attr.Mode != nil {
+		f.overrideMode(record, *options.Attr.Mode)
 	}
 	if !existed {
 		f.changed(parentPath)
