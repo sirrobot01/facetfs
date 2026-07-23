@@ -6,13 +6,14 @@ import (
 	"time"
 
 	"github.com/sirrobot01/facetfs"
+	"github.com/sirrobot01/facetfs/internal/names"
 )
 
 func (f *FS) Create(ctx context.Context, _ facetfs.Request, parent facetfs.ObjectRef, name string, options facetfs.CreateOptions) (facetfs.ObjectRef, facetfs.Handle, facetfs.Attr, error) {
 	if err := ctx.Err(); err != nil {
 		return facetfs.ObjectRef{}, nil, facetfs.Attr{}, err
 	}
-	if err := validName(name); err != nil {
+	if err := names.Validate(name); err != nil {
 		return facetfs.ObjectRef{}, nil, facetfs.Attr{}, err
 	}
 	f.mu.Lock()
@@ -55,7 +56,7 @@ func (f *FS) Mkdir(ctx context.Context, _ facetfs.Request, parent facetfs.Object
 	if err := ctx.Err(); err != nil {
 		return facetfs.ObjectRef{}, facetfs.Attr{}, err
 	}
-	if err := validName(name); err != nil {
+	if err := names.Validate(name); err != nil {
 		return facetfs.ObjectRef{}, facetfs.Attr{}, err
 	}
 	f.mu.Lock()
@@ -85,7 +86,7 @@ func (f *FS) Symlink(ctx context.Context, _ facetfs.Request, parent facetfs.Obje
 	if err := ctx.Err(); err != nil {
 		return facetfs.ObjectRef{}, facetfs.Attr{}, err
 	}
-	if err := validName(name); err != nil {
+	if err := names.Validate(name); err != nil {
 		return facetfs.ObjectRef{}, facetfs.Attr{}, err
 	}
 	f.mu.Lock()
@@ -131,7 +132,7 @@ func (f *FS) Link(ctx context.Context, _ facetfs.Request, object, parent facetfs
 	if object.ExportID != parent.ExportID {
 		return facetfs.ErrCrossDevice
 	}
-	if err := validName(name); err != nil {
+	if err := names.Validate(name); err != nil {
 		return err
 	}
 	f.mu.Lock()
@@ -161,7 +162,7 @@ func (f *FS) Remove(ctx context.Context, _ facetfs.Request, parent facetfs.Objec
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := validName(name); err != nil {
+	if err := names.Validate(name); err != nil {
 		return err
 	}
 	f.mu.Lock()
@@ -199,10 +200,10 @@ func (f *FS) Rename(ctx context.Context, _ facetfs.Request, oldParent facetfs.Ob
 	if oldParent.ExportID != newParent.ExportID {
 		return facetfs.ErrCrossDevice
 	}
-	if err := validName(oldName); err != nil {
+	if err := names.Validate(oldName); err != nil {
 		return err
 	}
-	if err := validName(newName); err != nil {
+	if err := names.Validate(newName); err != nil {
 		return err
 	}
 	f.mu.Lock()

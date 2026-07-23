@@ -2,16 +2,15 @@ package memfs
 
 import (
 	"context"
-	"crypto/rand"
 	"io/fs"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	"github.com/sirrobot01/facetfs"
+	"github.com/sirrobot01/facetfs/internal/names"
+	"github.com/sirrobot01/facetfs/internal/token"
 )
 
 const maxFileSize = 64 << 20
@@ -41,7 +40,7 @@ type FS struct {
 	mu       sync.RWMutex
 	nodes    map[facetfs.NodeID]*node
 	root     facetfs.NodeID
-	key      string
+	cursors  token.Codec
 	sequence uint64
 	revision uint64
 	handles  uint64
@@ -49,8 +48,8 @@ type FS struct {
 
 func New() *FS {
 	f := &FS{
-		nodes: make(map[facetfs.NodeID]*node),
-		key:   rand.Text(),
+		nodes:   make(map[facetfs.NodeID]*node),
+		cursors: token.New(),
 	}
 	root := f.makeNode(facetfs.NodeTypeDirectory, 0o755)
 	f.root = root.id
@@ -88,7 +87,7 @@ func (f *FS) Lookup(ctx context.Context, _ facetfs.Request, parent facetfs.Objec
 	if err := ctx.Err(); err != nil {
 		return facetfs.ObjectRef{}, facetfs.Attr{}, err
 	}
-	if err := validName(name); err != nil {
+	if err := names.Validate(name); err != nil {
 		return facetfs.ObjectRef{}, facetfs.Attr{}, err
 	}
 	f.mu.RLock()
@@ -270,14 +269,4 @@ func attr(n *node) facetfs.Attr {
 		FileID:         n.id,
 		Generation:     n.generation,
 	}
-}
-
-func validName(name string) error {
-	if len(name) > 255 {
-		return facetfs.ErrNameTooLong
-	}
-	if name == "" || name == "." || name == ".." || !utf8.ValidString(name) || strings.ContainsAny(name, "/\x00") {
-		return facetfs.ErrInvalid
-	}
-	return nil
 }

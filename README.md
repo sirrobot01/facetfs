@@ -70,7 +70,7 @@ The initial repository foundation includes:
 
 - core backend, handle, request, attribute, capability, and canonical-error
   contracts;
-- an in-memory backend and reusable backend contract tests;
+- in-memory and local-filesystem backends with reusable contract tests;
 - export validation and capability snapshots;
 - package boundaries for the coordinator, reference backends, state,
   metadata, wire codecs, frontends, and daemon;
