@@ -20,8 +20,10 @@ const (
 	defaultResponseLimit = 16 << 20
 )
 
+// Authenticator establishes the principal for an HTTP request.
 type Authenticator func(context.Context, *http.Request) (facetfs.Principal, error)
 
+// Options configures a WebDAV handler for one export.
 type Options struct {
 	ExportID           string
 	Prefix             string
@@ -32,6 +34,7 @@ type Options struct {
 	MaxResponseBytes   int64
 }
 
+// Handler serves one FacetFS export over WebDAV.
 type Handler struct {
 	server             *facetfs.Server
 	exportID           string
@@ -43,9 +46,14 @@ type Handler struct {
 	maxResponseBytes   int64
 }
 
+// New validates options and constructs a WebDAV handler.
 func New(server *facetfs.Server, options Options) (*Handler, error) {
 	if server == nil || options.ExportID == "" {
 		return nil, facetfs.ErrInvalid
+	}
+	export, ok := server.Export(options.ExportID)
+	if !ok || !export.Supports(facetfs.ProtocolWebDAV) {
+		return nil, facetfs.ErrNotFound
 	}
 	prefix := path.Clean("/" + strings.Trim(options.Prefix, "/"))
 	if prefix == "." {
@@ -61,9 +69,14 @@ func New(server *facetfs.Server, options Options) (*Handler, error) {
 		options.MaxResponseBytes = defaultResponseLimit
 	}
 	return &Handler{
-		server: server, exportID: options.ExportID, prefix: prefix, authenticate: options.Authenticate,
+		server:             server,
+		exportID:           options.ExportID,
+		prefix:             prefix,
+		authenticate:       options.Authenticate,
 		allowInsecureBasic: options.AllowInsecureBasic,
-		maxBodyBytes:       options.MaxBodyBytes, maxWalkNodes: options.MaxWalkNodes, maxResponseBytes: options.MaxResponseBytes,
+		maxBodyBytes:       options.MaxBodyBytes,
+		maxWalkNodes:       options.MaxWalkNodes,
+		maxResponseBytes:   options.MaxResponseBytes,
 	}, nil
 }
 

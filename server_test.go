@@ -73,6 +73,15 @@ func TestNewValidatesAndSnapshotsExports(t *testing.T) {
 	if server.Exports()[0].Protocols[0] != ProtocolWebDAV {
 		t.Fatal("Exports() returned mutable server configuration")
 	}
+	export, ok := server.Export("media")
+	if !ok || !export.Supports(ProtocolWebDAV) || export.Supports(ProtocolSFTP) {
+		t.Fatalf("Export() = %#v, %v", export, ok)
+	}
+	export.Protocols[0] = ProtocolSMB
+	current, ok := server.Export("media")
+	if !ok || current.Protocols[0] != ProtocolWebDAV {
+		t.Fatal("Export() returned mutable server configuration")
+	}
 	caps, ok := server.Capabilities("media")
 	if !ok || !caps.StableObjectIDs {
 		t.Fatalf("Capabilities() = %#v, %v", caps, ok)

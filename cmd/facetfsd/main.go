@@ -1,7 +1,6 @@
 // facetfsd is the standalone FacetFS composition binary.
 //
-// Protocol serving is intentionally unavailable until the Phase 1 coordinator
-// and the first frontend are implemented.
+// Network serving is composed through the embeddable frontend packages.
 package main
 
 import (

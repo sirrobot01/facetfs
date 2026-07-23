@@ -27,3 +27,11 @@ func (e Export) Supports(protocol Protocol) bool {
 	}
 	return slices.Contains(e.Protocols, protocol)
 }
+
+// Supports reports whether this export is visible through protocol.
+func (e ExportInfo) Supports(protocol Protocol) bool {
+	if len(e.Protocols) == 0 {
+		return true
+	}
+	return slices.Contains(e.Protocols, protocol)
+}

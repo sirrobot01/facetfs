@@ -18,8 +18,7 @@ type Config struct {
 	Authorizer Authorizer
 }
 
-// Server is the shared FacetFS runtime. Protocol registration and serving will
-// be added with the coordinator during Phase 1.
+// Server is the shared FacetFS runtime used by protocol frontends.
 type Server struct {
 	exports      []Export
 	byID         map[string]Export
@@ -113,6 +112,24 @@ func (s *Server) Exports() []ExportInfo {
 		}
 	}
 	return exports
+}
+
+// Export returns metadata for an export without exposing its backend.
+func (s *Server) Export(id string) (ExportInfo, bool) {
+	if s == nil {
+		return ExportInfo{}, false
+	}
+	export, ok := s.byID[id]
+	if !ok {
+		return ExportInfo{}, false
+	}
+	return ExportInfo{
+		ID:           export.ID,
+		Name:         export.Name,
+		ReadOnly:     export.ReadOnly,
+		Protocols:    slices.Clone(export.Protocols),
+		Capabilities: s.capabilities[id],
+	}, true
 }
 
 // Capabilities returns the startup capability snapshot for an export.

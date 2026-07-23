@@ -16,43 +16,17 @@ Applications will implement the backend once and choose which protocols to
 serve.
 
 > [!IMPORTANT]
-> The repository is at the Phase 0 foundation milestone. The core contracts
-> compile, but no network frontend serves traffic yet.
+> The core runtime, reference backends, WebDAV handler, and SSH/SFTP server are
+> implemented. NFSv4 and SMB are not implemented yet.
 
 ## Development
 
-The project requires Go 1.26.2. The baseline is dependency-free and must remain
-compatible with static, CGO-disabled builds.
+The project requires Go 1.26.2 and supports static, CGO-disabled builds.
 
 ```sh
 make check
 make build
 ./bin/facetfsd -version
-```
-
-## Target embedding API
-
-The following illustrates the intended API. Frontend constructors and serving
-lifecycle will be implemented in later milestones.
-
-```go
-srv, err := facetfs.New(ctx, facetfs.Config{
-    Exports: []facetfs.Export{{
-        ID:      "data",
-        Name:    "Data",
-        Backend: backend,
-    }},
-})
-if err != nil {
-    return err
-}
-
-srv.Add(nfs4.New(nfs4.Options{Addr: ":2049"}))
-srv.Add(smb.New(smb.Options{Addr: ":445"}))
-srv.Add(sftp.New(sftp.Options{Addr: ":2022"}))
-srv.Add(webdav.New(webdav.Options{Addr: ":8080"}))
-
-return srv.Serve(ctx)
 ```
 
 ## Goals
@@ -66,18 +40,22 @@ return srv.Serve(ctx)
 
 ## Current status
 
-The initial repository foundation includes:
+The repository currently includes:
 
 - core backend, handle, request, attribute, capability, and canonical-error
   contracts;
 - in-memory and local-filesystem backends with reusable contract tests;
 - export validation and capability snapshots;
-- package boundaries for the coordinator, reference backends, state,
-  metadata, wire codecs, frontends, and daemon;
+- shared open reservations, byte-range locks, namespace locking, state,
+  authorization, and change notifications;
+- a bounded WebDAV handler for file, collection, range, conditional, copy,
+  move, and property workflows;
+- an SSH/SFTP v3 server with public-key authentication, subsystem isolation,
+  coordinated handles, symlinks, POSIX rename, and filesystem statistics;
 - static-build, vet, test, and race-test automation.
 
-APIs and protocol profiles are not yet stable. The project currently has no
-protocol compliance claim.
+APIs and protocol profiles are not yet stable. NFSv4 and SMB packages remain
+placeholders.
 
 ## License
 
