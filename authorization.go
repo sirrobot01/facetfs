@@ -20,6 +20,7 @@ const (
 	ActionRename   Action = "rename"
 	ActionSetAttr  Action = "setattr"
 	ActionStatFS   Action = "statfs"
+	ActionLock     Action = "lock"
 )
 
 type AccessCheck struct {

@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"regexp"
 	"slices"
+	"sync"
+
+	"github.com/sirrobot01/facetfs/internal/coord"
 )
 
 var exportIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
@@ -22,6 +25,12 @@ type Server struct {
 	byID         map[string]Export
 	capabilities map[string]Capabilities
 	authorizer   Authorizer
+	opens        coord.OpenTable
+	locks        coord.LockTable
+	namespaces   coord.NamespaceLocks
+	changes      coord.Bus[ChangeEvent]
+	handlesMu    sync.Mutex
+	handles      map[string]map[*coordinatedHandle]struct{}
 }
 
 // New validates export identities and snapshots backend capabilities.
@@ -82,7 +91,10 @@ func New(ctx context.Context, config Config) (*Server, error) {
 			return ErrAccessDenied
 		})
 	}
-	return &Server{exports: exports, byID: byID, capabilities: capabilities, authorizer: authorizer}, nil
+	return &Server{
+		exports: exports, byID: byID, capabilities: capabilities, authorizer: authorizer,
+		handles: make(map[string]map[*coordinatedHandle]struct{}),
+	}, nil
 }
 
 // Exports returns export metadata without exposing backend implementations.

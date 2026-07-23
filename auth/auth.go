@@ -24,4 +24,5 @@ const (
 	ActionRename   = facetfs.ActionRename
 	ActionSetAttr  = facetfs.ActionSetAttr
 	ActionStatFS   = facetfs.ActionStatFS
+	ActionLock     = facetfs.ActionLock
 )
