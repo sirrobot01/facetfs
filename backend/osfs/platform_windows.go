@@ -7,8 +7,10 @@ import (
 	"io/fs"
 	"os"
 	"syscall"
+	"unsafe"
 
 	"github.com/sirrobot01/facetfs"
+	"golang.org/x/sys/windows"
 )
 
 const (
@@ -85,4 +87,71 @@ func sysOpen(path string, flag int, perm fs.FileMode) (*os.File, error) {
 		return nil, &os.PathError{Op: "open", Path: path, Err: err}
 	}
 	return os.NewFile(uintptr(handle), path), nil
+}
+
+// FILE_RENAME_INFO.Flags values for the FileRenameInfoEx class. POSIX semantics
+// let a rename replace a destination that still has open handles, unlinking the
+// old target the way rename(2) does; MoveFileEx (used by os.Rename) fails such a
+// replace with ERROR_ACCESS_DENIED.
+const (
+	fileRenameReplaceIfExists = 0x1
+	fileRenamePosixSemantics  = 0x2
+)
+
+// fileRenameInfoEx mirrors the fixed header of the Win32 FILE_RENAME_INFO
+// structure. The variable-length FileName follows in the same buffer; using a
+// struct here lets the compiler place RootDirectory at the correct alignment on
+// both 32- and 64-bit builds.
+type fileRenameInfoEx struct {
+	Flags          uint32
+	RootDirectory  windows.Handle
+	FileNameLength uint32
+	FileName       [1]uint16
+}
+
+// sysRename renames oldPath to newPath. For a replacing rename it uses
+// SetFileInformationByHandle with POSIX semantics so the destination can be
+// replaced even while open, matching Unix rename(2). Non-replacing renames (the
+// caller has already verified the destination is absent) and older systems fall
+// back to os.Rename.
+func sysRename(oldPath, newPath string, replace bool) error {
+	if !replace {
+		return os.Rename(oldPath, newPath)
+	}
+	err := posixRename(oldPath, newPath)
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) {
+		// FileRenameInfoEx predates Windows 10 1607; fall back where absent.
+		return os.Rename(oldPath, newPath)
+	}
+	return err
+}
+
+func posixRename(oldPath, newPath string) error {
+	source, err := windows.UTF16PtrFromString(oldPath)
+	if err != nil {
+		return err
+	}
+	// A DELETE-access handle is what SetFileInformationByHandle renames through;
+	// FILE_FLAG_BACKUP_SEMANTICS lets the same path work for directories too.
+	handle, err := windows.CreateFile(source, windows.DELETE|windows.SYNCHRONIZE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil, windows.OPEN_EXISTING, windows.FILE_FLAG_BACKUP_SEMANTICS, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(handle)
+
+	target, err := windows.UTF16FromString(newPath)
+	if err != nil {
+		return err
+	}
+	nameLen := (len(target) - 1) * 2 // bytes, excluding the terminating NUL
+	nameOffset := unsafe.Offsetof(fileRenameInfoEx{}.FileName)
+	buf := make([]byte, nameOffset+uintptr(nameLen))
+	info := (*fileRenameInfoEx)(unsafe.Pointer(&buf[0]))
+	info.Flags = fileRenameReplaceIfExists | fileRenamePosixSemantics
+	info.RootDirectory = 0
+	info.FileNameLength = uint32(nameLen)
+	copy(unsafe.Slice((*uint16)(unsafe.Pointer(&buf[nameOffset])), len(target)-1), target[:len(target)-1])
+	return windows.SetFileInformationByHandle(handle, windows.FileRenameInfoEx, &buf[0], uint32(len(buf)))
 }

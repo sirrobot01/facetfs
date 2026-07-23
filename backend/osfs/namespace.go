@@ -212,7 +212,7 @@ func (f *FS) Rename(ctx context.Context, _ facetfs.Request, oldParent facetfs.Ob
 	} else if err != nil && !os.IsNotExist(err) {
 		return mapError(err)
 	}
-	if err := os.Rename(oldPath, newPath); err != nil {
+	if err := sysRename(oldPath, newPath, options.Replace); err != nil {
 		return mapError(err)
 	}
 	f.moved(oldPath, newPath)

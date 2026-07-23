@@ -27,6 +27,13 @@ func sysOpen(path string, flag int, perm fs.FileMode) (*os.File, error) {
 	return os.OpenFile(path, flag, perm)
 }
 
+// sysRename renames oldPath to newPath. On Unix os.Rename already replaces an
+// existing destination atomically, even while it is open, so replace carries no
+// extra behaviour here; the Windows build needs it to select POSIX semantics.
+func sysRename(oldPath, newPath string, _ bool) error {
+	return os.Rename(oldPath, newPath)
+}
+
 var caseSensitive = runtime.GOOS != "darwin"
 
 func platformError(err error) facetfs.ErrorCode {
