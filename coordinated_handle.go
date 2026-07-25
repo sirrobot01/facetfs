@@ -76,6 +76,9 @@ func (h *coordinatedMutableHandle) WriteAt(ctx context.Context, p []byte, off in
 	if err := h.server.authorizer.Authorize(ctx, h.request, AccessCheck{Action: ActionWrite, Object: h.Object()}); err != nil {
 		return 0, err
 	}
+	if err := h.server.guardLocks(h.request, objectKey(h.Object())); err != nil {
+		return 0, err
+	}
 	if len(p) > 0 && h.server.locks.Conflicts(objectKey(h.Object()), h.owner, uint64(off), uint64(len(p)), true) {
 		return 0, ErrLockConflict
 	}
@@ -95,6 +98,9 @@ func (h *coordinatedMutableHandle) Flush(ctx context.Context, stable bool) error
 
 func (h *coordinatedMutableHandle) SetAttr(ctx context.Context, set SetAttr) (Attr, error) {
 	if err := h.server.authorizer.Authorize(ctx, h.request, AccessCheck{Action: ActionSetAttr, Object: h.Object()}); err != nil {
+		return Attr{}, err
+	}
+	if err := h.server.guardLocks(h.request, objectKey(h.Object())); err != nil {
 		return Attr{}, err
 	}
 	attr, err := h.handle.SetAttr(ctx, set)

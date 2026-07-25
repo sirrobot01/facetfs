@@ -6,9 +6,14 @@ import (
 	"regexp"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/sirrobot01/facetfs/internal/coord"
 )
+
+// maxDocumentLocks bounds the number of concurrently held document locks so a
+// client cannot exhaust memory through a lock flood.
+const maxDocumentLocks = 1 << 16
 
 var exportIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
@@ -16,6 +21,9 @@ var exportIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 type Config struct {
 	Exports    []Export
 	Authorizer Authorizer
+	// Now supplies the clock used for document-lock expiry. It defaults to
+	// time.Now and is injectable for deterministic tests.
+	Now func() time.Time
 }
 
 // Server is the shared FacetFS runtime used by protocol frontends.
@@ -24,8 +32,10 @@ type Server struct {
 	byID         map[string]Export
 	capabilities map[string]Capabilities
 	authorizer   Authorizer
+	now          func() time.Time
 	opens        coord.OpenTable
 	locks        coord.LockTable
+	doclocks     *coord.DocLockTable
 	namespaces   coord.NamespaceLocks
 	changes      coord.Bus[ChangeEvent]
 	handlesMu    sync.Mutex
@@ -90,9 +100,15 @@ func New(ctx context.Context, config Config) (*Server, error) {
 			return ErrAccessDenied
 		})
 	}
+	now := config.Now
+	if now == nil {
+		now = time.Now
+	}
 	return &Server{
 		exports: exports, byID: byID, capabilities: capabilities, authorizer: authorizer,
-		handles: make(map[string]map[*coordinatedHandle]struct{}),
+		now:      now,
+		doclocks: coord.NewDocLockTable(now, maxDocumentLocks),
+		handles:  make(map[string]map[*coordinatedHandle]struct{}),
 	}, nil
 }
 
@@ -130,6 +146,15 @@ func (s *Server) Export(id string) (ExportInfo, bool) {
 		Protocols:    slices.Clone(export.Protocols),
 		Capabilities: s.capabilities[id],
 	}, true
+}
+
+// Now returns the server clock used for lock expiry. Frontends use it so that
+// wire timeouts reflect the same clock the coordinator enforces.
+func (s *Server) Now() time.Time {
+	if s == nil || s.now == nil {
+		return time.Now()
+	}
+	return s.now()
 }
 
 // Capabilities returns the startup capability snapshot for an export.

@@ -55,6 +55,19 @@ func (h *Handler) move(w http.ResponseWriter, r *http.Request, request facetfs.R
 		w.WriteHeader(http.StatusPreconditionFailed)
 		return
 	}
+	// A MOVE changes both ends — the source leaves its collection and the
+	// destination is written — so the If header is evaluated against each.
+	sourceObject, sourceAttr, err := h.server.Lookup(r.Context(), request, sourceParent, sourceName)
+	if err != nil {
+		h.writeError(w, err)
+		return
+	}
+	if !h.checkIf(w, r, source, entityTag(sourceObject, sourceAttr), sourceObject, sourceParent) {
+		return
+	}
+	if !h.checkIf(w, r, target, destinationTag(exists, targetObject, targetAttr), destinationLocks(exists, targetObject, targetParent)...) {
+		return
+	}
 	if exists {
 		if err := h.removeObject(r, request, targetParent, targetName, targetObject, targetAttr); err != nil {
 			h.writeError(w, err)

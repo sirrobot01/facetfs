@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -96,6 +98,15 @@ func (h *Handler) put(w http.ResponseWriter, r *http.Request, request facetfs.Re
 		}
 		etag = entityTag(object, attr)
 	}
+	// A lock on the parent collection governs adding a member, so it is consulted
+	// whether or not the target itself exists.
+	locked := []facetfs.ObjectRef{parent}
+	if exists {
+		locked = append(locked, object)
+	}
+	if !h.checkIf(w, r, segments, etag, locked...) {
+		return
+	}
 	if !writeConditions(w, r, exists, etag) {
 		return
 	}
@@ -177,6 +188,10 @@ func (h *Handler) mkcol(w http.ResponseWriter, r *http.Request, request facetfs.
 		h.writeError(w, err)
 		return
 	}
+	// The collection does not exist yet, so only a lock on its parent governs it.
+	if !h.checkIf(w, r, segments, "", parent) {
+		return
+	}
 	if _, _, err := h.server.Mkdir(r.Context(), request, parent, name, facetfs.SetAttr{}); err != nil {
 		h.writeError(w, err)
 		return
@@ -195,6 +210,10 @@ func (h *Handler) remove(w http.ResponseWriter, r *http.Request, request facetfs
 		h.writeError(w, err)
 		return
 	}
+	// Removing a member is governed by a lock on the member or on its collection.
+	if !h.checkIf(w, r, segments, entityTag(object, attr), object, parent) {
+		return
+	}
 	if err := h.removeObject(r, request, parent, name, object, attr); err != nil {
 		h.writeError(w, err)
 		return
@@ -205,6 +224,77 @@ func (h *Handler) remove(w http.ResponseWriter, r *http.Request, request facetfs
 func entityTag(object facetfs.ObjectRef, attr facetfs.Attr) string {
 	value := fmt.Sprintf("%s\x00%d\x00%s\x00%d", object.NodeID, object.Generation, attr.ChangeToken, attr.Size)
 	return fmt.Sprintf("\"%x\"", sha256.Sum256([]byte(value)))
+}
+
+// checkIf evaluates the WebDAV If header against the resource named by segments.
+// A state token is satisfied by a lock held on any of objects, so a client
+// mutating a member of a locked collection submits the collection's token (RFC
+// 4918 §7.4) — the same token the coordinator requires to admit the mutation.
+// Callers pass only objects that exist. It returns false and writes 412 when the
+// header is present and applies to this resource but its preconditions fail.
+func (h *Handler) checkIf(w http.ResponseWriter, r *http.Request, segments []string, etag string, objects ...facetfs.ObjectRef) bool {
+	if r.Header.Get("If") == "" {
+		return true
+	}
+	var held []string
+	for _, object := range objects {
+		if lock, ok := h.server.LockOf(object); ok {
+			held = append(held, lock.Token)
+		}
+	}
+	// Untagged lists name the request-URI, so whether this resource is the one the
+	// request names decides if they apply to it.
+	requestSegments, err := h.segments(r.URL)
+	target := ifTarget{
+		segments:   segments,
+		requestURI: err == nil && slices.Equal(requestSegments, segments),
+		etag:       etag,
+		tokens:     held,
+	}
+	if !evaluateIf(r.Header.Get("If"), target, h.tagResolver(r)) {
+		w.WriteHeader(http.StatusPreconditionFailed)
+		return false
+	}
+	return true
+}
+
+// destinationTag returns the entity tag a COPY or MOVE destination presents to
+// an If header, which is empty when nothing is there to overwrite.
+func destinationTag(exists bool, object facetfs.ObjectRef, attr facetfs.Attr) string {
+	if !exists {
+		return ""
+	}
+	return entityTag(object, attr)
+}
+
+// destinationLocks returns the objects whose locks govern writing a COPY or MOVE
+// destination: the collection it is written into, and the object it replaces.
+func destinationLocks(exists bool, object, parent facetfs.ObjectRef) []facetfs.ObjectRef {
+	if !exists {
+		return []facetfs.ObjectRef{parent}
+	}
+	return []facetfs.ObjectRef{parent, object}
+}
+
+// tagResolver maps an If header resource tag to export-relative path segments so
+// that a tagged list can be matched against the resource it names. A tag naming
+// another host, or a path outside this export, resolves to nothing and so
+// applies to no resource served here.
+func (h *Handler) tagResolver(r *http.Request) func(string) ([]string, bool) {
+	return func(tag string) ([]string, bool) {
+		parsed, err := url.Parse(tag)
+		if err != nil {
+			return nil, false
+		}
+		if parsed.Host != "" && !strings.EqualFold(parsed.Host, r.Host) {
+			return nil, false
+		}
+		segments, err := h.segments(parsed)
+		if err != nil {
+			return nil, false
+		}
+		return segments, true
+	}
 }
 
 func readConditions(w http.ResponseWriter, r *http.Request, etag string, modified time.Time) bool {

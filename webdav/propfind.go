@@ -33,13 +33,25 @@ type propstat struct {
 }
 
 type properties struct {
-	DisplayName   string       `xml:"displayname"`
-	ResourceType  resourceType `xml:"resourcetype"`
-	ContentLength string       `xml:"getcontentlength,omitempty"`
-	LastModified  string       `xml:"getlastmodified,omitempty"`
-	CreationDate  string       `xml:"creationdate,omitempty"`
-	ETag          string       `xml:"getetag,omitempty"`
-	ContentType   string       `xml:"getcontenttype,omitempty"`
+	DisplayName   string        `xml:"displayname"`
+	ResourceType  resourceType  `xml:"resourcetype"`
+	ContentLength string        `xml:"getcontentlength,omitempty"`
+	LastModified  string        `xml:"getlastmodified,omitempty"`
+	CreationDate  string        `xml:"creationdate,omitempty"`
+	ETag          string        `xml:"getetag,omitempty"`
+	ContentType   string        `xml:"getcontenttype,omitempty"`
+	SupportedLock supportedLock `xml:"supportedlock"`
+}
+
+// supportedLock advertises the lock capabilities of the export. Class 2 support
+// is exclusive write locks (RFC 4918 §15.10).
+type supportedLock struct {
+	LockEntry lockEntry `xml:"lockentry"`
+}
+
+type lockEntry struct {
+	LockScope lockScope `xml:"lockscope"`
+	LockType  lockType  `xml:"locktype"`
 }
 
 type resourceType struct {
@@ -140,6 +152,10 @@ func (h *Handler) propertyResponse(segments []string, object facetfs.ObjectRef, 
 		LastModified: attr.ModifiedAt.UTC().Format(http.TimeFormat),
 		CreationDate: attr.CreatedAt.UTC().Format(time.RFC3339Nano),
 		ETag:         entityTag(object, attr),
+		SupportedLock: supportedLock{LockEntry: lockEntry{
+			LockScope: lockScope{Exclusive: &struct{}{}},
+			LockType:  lockType{Write: &struct{}{}},
+		}},
 	}
 	if attr.Type == facetfs.NodeTypeDirectory {
 		properties.ResourceType.Collection = &struct{}{}

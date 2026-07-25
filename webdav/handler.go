@@ -87,6 +87,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer h.server.CloseSession(context.WithoutCancel(r.Context()), request.SessionID)
+	request.LockTokens = ifTokens(r.Header.Get("If"))
 	segments, err := h.segments(r.URL)
 	if err != nil {
 		h.writeError(w, err)
@@ -110,11 +111,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.copy(w, r, request, segments)
 	case "PROPFIND":
 		h.propfind(w, r, request, segments)
+	case "LOCK":
+		h.lock(w, r, request, segments)
+	case "UNLOCK":
+		h.unlock(w, r, request, segments)
 	default:
-		w.Header().Set("Allow", "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, COPY, MOVE")
+		w.Header().Set("Allow", allowMethods)
 		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 	}
 }
+
+const allowMethods = "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, COPY, MOVE, LOCK, UNLOCK"
 
 func (h *Handler) request(r *http.Request) (facetfs.Request, error) {
 	if strings.HasPrefix(strings.ToLower(r.Header.Get("Authorization")), "basic ") && r.TLS == nil && !h.allowInsecureBasic {
@@ -188,8 +195,8 @@ func (h *Handler) parent(ctx context.Context, request facetfs.Request, segments 
 }
 
 func (h *Handler) options(w http.ResponseWriter) {
-	w.Header().Set("DAV", "1")
-	w.Header().Set("Allow", "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, COPY, MOVE")
+	w.Header().Set("DAV", "1, 2")
+	w.Header().Set("Allow", allowMethods)
 	w.WriteHeader(http.StatusNoContent)
 }
 
