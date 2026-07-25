@@ -11,7 +11,9 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -162,6 +164,68 @@ func TestWebDAVAndSFTPShareState(t *testing.T) {
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Body.String() != "shared data" {
 		t.Fatalf("WebDAV GET = %d, %q", response.Code, response.Body.String())
+	}
+}
+
+func TestWebDAVLockBlocksSFTPWrite(t *testing.T) {
+	server, client, _ := startServer(t)
+	handler, err := webdav.New(server, webdav.Options{
+		ExportID: "data",
+		Authenticate: func(context.Context, *http.Request) (facetfs.Principal, error) {
+			return facetfs.Principal{Subject: "user"}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dav := func(method, target, body string, headers map[string]string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(method, target, bytes.NewBufferString(body))
+		for name, value := range headers {
+			request.Header.Set(name, value)
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		return response
+	}
+
+	if response := dav(http.MethodPut, "/doc", "original", nil); response.Code != http.StatusCreated {
+		t.Fatalf("WebDAV PUT = %d: %s", response.Code, response.Body.String())
+	}
+	lockBody := `<?xml version="1.0" encoding="utf-8"?>` +
+		`<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope>` +
+		`<locktype><write/></locktype><owner>tester</owner></lockinfo>`
+	lock := dav("LOCK", "/doc", lockBody, nil)
+	if lock.Code != http.StatusOK {
+		t.Fatalf("WebDAV LOCK = %d: %s", lock.Code, lock.Body.String())
+	}
+	token := strings.Trim(lock.Header().Get("Lock-Token"), "<>")
+
+	// The WebDAV exclusive lock must block an SFTP write and rename.
+	file, err := client.OpenFile("/doc", os.O_WRONLY)
+	if err == nil {
+		_, err = file.WriteAt([]byte("x"), 0)
+		_ = file.Close()
+	}
+	if err == nil {
+		t.Fatal("SFTP write succeeded while WebDAV lock was held")
+	}
+	if err := client.PosixRename("/doc", "/moved"); err == nil {
+		t.Fatal("SFTP rename succeeded while WebDAV lock was held")
+	}
+
+	// After UNLOCK the SFTP write proceeds.
+	if response := dav("UNLOCK", "/doc", "", map[string]string{"Lock-Token": "<" + token + ">"}); response.Code != http.StatusNoContent {
+		t.Fatalf("WebDAV UNLOCK = %d: %s", response.Code, response.Body.String())
+	}
+	file, err = client.OpenFile("/doc", os.O_WRONLY)
+	if err != nil {
+		t.Fatalf("SFTP open after unlock = %v", err)
+	}
+	if _, err := file.WriteAt([]byte("Y"), 0); err != nil {
+		t.Fatalf("SFTP write after unlock = %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("SFTP close after unlock = %v", err)
 	}
 }
 

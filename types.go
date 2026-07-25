@@ -45,6 +45,11 @@ type Request struct {
 	ClientID   string
 	SessionID  string
 	RemoteAddr net.Addr
+	// LockTokens are advisory lock tokens the caller presents for this
+	// operation, such as WebDAV lock tokens submitted in an If header. A
+	// mutation of an object with a conflicting document lock is rejected unless
+	// a matching token appears here.
+	LockTokens []string
 }
 
 // NodeType describes the kind of a filesystem object.

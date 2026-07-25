@@ -72,6 +72,11 @@ func (h *Handler) copy(w http.ResponseWriter, r *http.Request, request facetfs.R
 		w.WriteHeader(http.StatusPreconditionFailed)
 		return
 	}
+	// A COPY writes only the destination; the source is read, not modified, so no
+	// lock on it is required (RFC 4918 §9.8.3).
+	if !h.checkIf(w, r, target, destinationTag(exists, targetObject, targetAttr), destinationLocks(exists, targetObject, targetParent)...) {
+		return
+	}
 	if exists {
 		if err := h.removeObject(r, request, targetParent, targetName, targetObject, targetAttr); err != nil {
 			h.writeError(w, err)

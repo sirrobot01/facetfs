@@ -74,6 +74,11 @@ func (s *Server) Open(ctx context.Context, request Request, object ObjectRef, op
 			return nil, err
 		}
 	}
+	if options.Access&(OpenWrite|OpenDelete) != 0 {
+		if err := s.guardLocks(request, objectKey(object)); err != nil {
+			return nil, err
+		}
+	}
 	owner, err := requestOwner(request)
 	if err != nil {
 		return nil, err
@@ -103,6 +108,9 @@ func (s *Server) Create(ctx context.Context, request Request, parent ObjectRef, 
 		return ObjectRef{}, nil, Attr{}, err
 	}
 	if err := s.authorizer.Authorize(ctx, request, AccessCheck{Action: ActionCreate, Parent: parent, Name: name}); err != nil {
+		return ObjectRef{}, nil, Attr{}, err
+	}
+	if err := s.guardLocks(request, objectKey(parent)); err != nil {
 		return ObjectRef{}, nil, Attr{}, err
 	}
 	unlock, err := s.namespaces.Lock(ctx, objectKey(parent), namespaceKey(parent, name))
@@ -139,6 +147,9 @@ func (s *Server) Mkdir(ctx context.Context, request Request, parent ObjectRef, n
 	if err := s.authorizer.Authorize(ctx, request, AccessCheck{Action: ActionMkdir, Parent: parent, Name: name}); err != nil {
 		return ObjectRef{}, Attr{}, err
 	}
+	if err := s.guardLocks(request, objectKey(parent)); err != nil {
+		return ObjectRef{}, Attr{}, err
+	}
 	unlock, err := s.namespaces.Lock(ctx, objectKey(parent), namespaceKey(parent, name))
 	if err != nil {
 		return ObjectRef{}, Attr{}, err
@@ -157,6 +168,9 @@ func (s *Server) Symlink(ctx context.Context, request Request, parent ObjectRef,
 		return ObjectRef{}, Attr{}, err
 	}
 	if err := s.authorizer.Authorize(ctx, request, AccessCheck{Action: ActionSymlink, Parent: parent, Name: name}); err != nil {
+		return ObjectRef{}, Attr{}, err
+	}
+	if err := s.guardLocks(request, objectKey(parent)); err != nil {
 		return ObjectRef{}, Attr{}, err
 	}
 	unlock, err := s.namespaces.Lock(ctx, objectKey(parent), namespaceKey(parent, name))
@@ -193,6 +207,9 @@ func (s *Server) Link(ctx context.Context, request Request, object, parent Objec
 	if err := s.authorizer.Authorize(ctx, request, AccessCheck{Action: ActionLink, Object: object, Parent: parent, Name: name}); err != nil {
 		return err
 	}
+	if err := s.guardLocks(request, objectKey(parent)); err != nil {
+		return err
+	}
 	unlock, err := s.namespaces.Lock(ctx, objectKey(object), objectKey(parent), namespaceKey(parent, name))
 	if err != nil {
 		return err
@@ -213,6 +230,9 @@ func (s *Server) Remove(ctx context.Context, request Request, parent ObjectRef, 
 	if err := s.authorizer.Authorize(ctx, request, AccessCheck{Action: ActionRemove, Parent: parent, Name: name}); err != nil {
 		return err
 	}
+	if err := s.guardLocks(request, objectKey(parent)); err != nil {
+		return err
+	}
 	unlock, err := s.namespaces.Lock(ctx, objectKey(parent), namespaceKey(parent, name))
 	if err != nil {
 		return err
@@ -222,11 +242,15 @@ func (s *Server) Remove(ctx context.Context, request Request, parent ObjectRef, 
 	if err != nil {
 		return err
 	}
+	if err := s.guardLocks(request, objectKey(object)); err != nil {
+		return err
+	}
 	if s.opens.Conflicts(objectKey(object), uint8(OpenDelete)) {
 		return ErrLockConflict
 	}
 	err = backend.Remove(ctx, request, parent, name, kind)
 	if err == nil {
+		s.dropLocks(object)
 		s.changed(ChangeEvent{Kind: ChangeRemoved, Object: object, Parent: parent})
 	}
 	return err
@@ -251,6 +275,9 @@ func (s *Server) Rename(ctx context.Context, request Request, oldParent ObjectRe
 	if err := s.authorizer.Authorize(ctx, request, check); err != nil {
 		return err
 	}
+	if err := s.guardLocks(request, objectKey(oldParent), objectKey(newParent)); err != nil {
+		return err
+	}
 	unlock, err := s.namespaces.Lock(ctx,
 		objectKey(oldParent), namespaceKey(oldParent, oldName),
 		objectKey(newParent), namespaceKey(newParent, newName),
@@ -263,18 +290,32 @@ func (s *Server) Rename(ctx context.Context, request Request, oldParent ObjectRe
 	if err != nil {
 		return err
 	}
+	if err := s.guardLocks(request, objectKey(object)); err != nil {
+		return err
+	}
 	if s.opens.Conflicts(objectKey(object), uint8(OpenDelete)) {
 		return ErrLockConflict
 	}
+	var replaced ObjectRef
+	overwrites := false
 	if target, _, lookupErr := backend.Lookup(ctx, request, newParent, newName); lookupErr == nil {
+		if err := s.guardLocks(request, objectKey(target)); err != nil {
+			return err
+		}
 		if s.opens.Conflicts(objectKey(target), uint8(OpenDelete)) {
 			return ErrLockConflict
 		}
+		replaced, overwrites = target, true
 	} else if !errors.Is(lookupErr, ErrNotFound) {
 		return lookupErr
 	}
 	err = backend.Rename(ctx, request, oldParent, oldName, newParent, newName, options)
 	if err == nil {
+		// The rename destroys any object it overwrote. The renamed object keeps its
+		// identity, and with it its locks.
+		if overwrites {
+			s.dropLocks(replaced)
+		}
 		s.changed(ChangeEvent{Kind: ChangeNamespace, Object: object, Parent: oldParent, NewParent: newParent})
 	}
 	return err
@@ -286,6 +327,9 @@ func (s *Server) SetAttr(ctx context.Context, request Request, object ObjectRef,
 		return Attr{}, err
 	}
 	if err := s.authorizer.Authorize(ctx, request, AccessCheck{Action: ActionSetAttr, Object: object}); err != nil {
+		return Attr{}, err
+	}
+	if err := s.guardLocks(request, objectKey(object)); err != nil {
 		return Attr{}, err
 	}
 	unlock, err := s.namespaces.Lock(ctx, objectKey(object))
