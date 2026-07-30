@@ -69,6 +69,11 @@ func (h *Handler) put(w http.ResponseWriter, r *http.Request, segments []string)
 
 	file, err := h.FileSystem.OpenFile(r.Context(), p, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
 	if err != nil {
+		if !exists && errors.Is(err, fs.ErrNotExist) {
+			// RFC 4918 §9.7.1: a missing intermediate collection is 409.
+			http.Error(w, http.StatusText(http.StatusConflict), http.StatusConflict)
+			return
+		}
 		h.writeError(w, r, err)
 		return
 	}

@@ -67,7 +67,7 @@ func (h *Handler) propfind(w http.ResponseWriter, r *http.Request, segments []st
 	}
 	if len(bytes.TrimSpace(body)) > 0 {
 		var requestBody struct{ XMLName xml.Name }
-		if xml.Unmarshal(body, &requestBody) != nil || requestBody.XMLName != (xml.Name{Space: "DAV:", Local: "propfind"}) {
+		if xml.Unmarshal(body, &requestBody) != nil || requestBody.XMLName != (xml.Name{Space: "DAV:", Local: "propfind"}) || !validNamespaces(body) {
 			h.writeError(w, r, fs.ErrInvalid)
 			return
 		}
@@ -113,6 +113,27 @@ func (h *Handler) propfind(w http.ResponseWriter, r *http.Request, segments []st
 	w.Header().Set("Content-Type", "application/xml; charset=utf-8")
 	w.WriteHeader(http.StatusMultiStatus)
 	_, _ = w.Write(output.Bytes())
+}
+
+// validNamespaces reports whether the XML body declares no empty prefixed
+// namespace (xmlns:prefix=""), which XML 1.0 forbids but encoding/xml accepts.
+func validNamespaces(body []byte) bool {
+	decoder := xml.NewDecoder(bytes.NewReader(body))
+	for {
+		token, err := decoder.Token()
+		if err != nil {
+			return err == io.EOF
+		}
+		start, ok := token.(xml.StartElement)
+		if !ok {
+			continue
+		}
+		for _, attr := range start.Attr {
+			if attr.Name.Space == "xmlns" && attr.Value == "" {
+				return false
+			}
+		}
+	}
 }
 
 func (h *Handler) propertyResponse(segments []string, fi fs.FileInfo) propResponse {

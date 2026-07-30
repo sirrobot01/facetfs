@@ -1,6 +1,14 @@
 // Package webdav provides a WebDAV handler (RFC 4918) that serves a
 // facetfs.FileSystem over HTTP. The caller owns the HTTP server, transport
 // security, and authentication.
+//
+// The handler deviates from RFC 4918 in three documented ways. Locks are
+// exclusive write locks with Depth 0 only; a shared-lock or Depth-infinity
+// LOCK is refused rather than downgraded. Dead properties are not stored;
+// PROPPATCH enforces lock and If preconditions, then refuses every property
+// change atomically with a 403 propstat. Entity tags derive from modification
+// time and size, so a FileSystem whose ModTime is coarse yields weak change
+// detection.
 package webdav
 
 import (
@@ -100,6 +108,8 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.copy(w, r, segments)
 	case "PROPFIND":
 		h.propfind(w, r, segments)
+	case "PROPPATCH":
+		h.proppatch(w, r, segments)
 	case "LOCK":
 		if h.LockSystem == nil {
 			h.methodNotAllowed(w)
@@ -123,7 +133,7 @@ func (h *Handler) methodNotAllowed(w http.ResponseWriter) {
 }
 
 func (h *Handler) allowMethods() string {
-	methods := "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, COPY, MOVE"
+	methods := "OPTIONS, PROPFIND, PROPPATCH, GET, HEAD, PUT, MKCOL, DELETE, COPY, MOVE"
 	if h.LockSystem != nil {
 		methods += ", LOCK, UNLOCK"
 	}

@@ -100,6 +100,9 @@ func (h *Handler) copy(w http.ResponseWriter, r *http.Request, source []string) 
 		h.writeError(w, r, statErr)
 		return
 	}
+	if !h.destinationParentExists(w, r, target) {
+		return
+	}
 	if exists && r.Header.Get("Overwrite") == "F" {
 		w.WriteHeader(http.StatusPreconditionFailed)
 		return
@@ -166,6 +169,17 @@ func (h *Handler) copyFile(r *http.Request, source, destination string, perm fs.
 	return err
 }
 
+// destinationParentExists checks that the collection a COPY or MOVE writes
+// into is mapped, writing 409 when it is not (RFC 4918 §9.8.5, §9.9.4).
+func (h *Handler) destinationParentExists(w http.ResponseWriter, r *http.Request, target []string) bool {
+	fi, err := h.FileSystem.Stat(r.Context(), fsPath(target[:len(target)-1]))
+	if err != nil || !fi.IsDir() {
+		http.Error(w, http.StatusText(http.StatusConflict), http.StatusConflict)
+		return false
+	}
+	return true
+}
+
 // destinationTag returns the entity tag a COPY or MOVE destination presents to
 // an If header, which is empty when nothing is there to overwrite.
 func destinationTag(exists bool, fi fs.FileInfo) string {
@@ -223,6 +237,9 @@ func (h *Handler) move(w http.ResponseWriter, r *http.Request, source []string) 
 	exists := statErr == nil
 	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
 		h.writeError(w, r, statErr)
+		return
+	}
+	if !h.destinationParentExists(w, r, target) {
 		return
 	}
 	if exists && r.Header.Get("Overwrite") == "F" {

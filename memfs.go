@@ -268,20 +268,20 @@ func (m *memFS) Lstat(ctx context.Context, name string) (fs.FileInfo, error) {
 	return node.info(path.Base(path.Clean("/" + name))), nil
 }
 
-func (m *memFS) Symlink(ctx context.Context, oldname, newname string) error {
+func (m *memFS) Symlink(ctx context.Context, oldName, newName string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	parent, base, err := m.parentOf(newname)
+	parent, base, err := m.parentOf(newName)
 	if err != nil {
-		return pathError("symlink", newname, err)
+		return pathError("symlink", newName, err)
 	}
 	if _, ok := parent.children[base]; ok {
-		return pathError("symlink", newname, fs.ErrExist)
+		return pathError("symlink", newName, fs.ErrExist)
 	}
 	parent.children[base] = &memNode{
 		mode:    fs.ModeSymlink | 0o777,
 		modTime: time.Now(),
-		link:    oldname,
+		link:    oldName,
 	}
 	parent.touch()
 	return nil

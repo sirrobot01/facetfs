@@ -348,3 +348,42 @@ func serve(handler http.Handler, method, target string, body io.Reader, headers 
 	handler.ServeHTTP(response, request)
 	return response
 }
+
+// PROPPATCH parses the body, honors locks, and refuses every property change
+// atomically with a 403 propstat: dead properties are not stored.
+func TestProppatch(t *testing.T) {
+	handler := newHandler()
+	if response := serve(handler, http.MethodPut, "/dav/file", strings.NewReader("v"), nil); response.Code != http.StatusCreated {
+		t.Fatalf("PUT = %d", response.Code)
+	}
+	patch := `<?xml version="1.0"?><propertyupdate xmlns="DAV:" xmlns:z="urn:z">` +
+		`<set><prop><z:author>me</z:author></prop></set></propertyupdate>`
+	response := serve(handler, "PROPPATCH", "/dav/file", strings.NewReader(patch), nil)
+	if response.Code != http.StatusMultiStatus || !strings.Contains(response.Body.String(), "403 Forbidden") {
+		t.Fatalf("PROPPATCH = %d: %s", response.Code, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), "author") {
+		t.Fatalf("PROPPATCH response does not name the property: %s", response.Body.String())
+	}
+
+	lock := serve(handler, "LOCK", "/dav/file", strings.NewReader(exclusiveWriteLock), nil)
+	if lock.Code != http.StatusOK {
+		t.Fatalf("LOCK = %d", lock.Code)
+	}
+	if response := serve(handler, "PROPPATCH", "/dav/file", strings.NewReader(patch), nil); response.Code != http.StatusLocked {
+		t.Fatalf("PROPPATCH on locked resource = %d, want 423", response.Code)
+	}
+
+	if response := serve(handler, "PROPPATCH", "/dav/missing", strings.NewReader(patch), nil); response.Code != http.StatusNotFound {
+		t.Fatalf("PROPPATCH on missing resource = %d, want 404", response.Code)
+	}
+}
+
+// A PROPFIND body with an illegal empty namespace declaration is rejected.
+func TestPropfindInvalidNamespace(t *testing.T) {
+	handler := newHandler()
+	body := `<?xml version="1.0"?><propfind xmlns="DAV:"><prop><foo:bar xmlns:foo=""/></prop></propfind>`
+	if response := serve(handler, "PROPFIND", "/dav/", strings.NewReader(body), map[string]string{"Depth": "0"}); response.Code != http.StatusBadRequest {
+		t.Fatalf("PROPFIND with empty prefixed xmlns = %d, want 400", response.Code)
+	}
+}

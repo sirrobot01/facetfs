@@ -41,7 +41,7 @@ type File interface {
 // SymlinkFS is implemented by filesystems that support symbolic links.
 type SymlinkFS interface {
 	FileSystem
-	Symlink(ctx context.Context, oldname, newname string) error
+	Symlink(ctx context.Context, oldName, newName string) error
 	Readlink(ctx context.Context, name string) (string, error)
 	Lstat(ctx context.Context, name string) (fs.FileInfo, error)
 }
