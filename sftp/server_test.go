@@ -9,38 +9,19 @@ import (
 	"io"
 	"io/fs"
 	"net"
-	"net/http"
-	"net/http/httptest"
-	"os"
 	"slices"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	clientsftp "github.com/pkg/sftp"
 	"github.com/sirrobot01/facetfs"
-	"github.com/sirrobot01/facetfs/backend/memfs"
 	serversftp "github.com/sirrobot01/facetfs/sftp"
-	"github.com/sirrobot01/facetfs/webdav"
 	"golang.org/x/crypto/ssh"
 )
 
 func TestSFTPWorkflow(t *testing.T) {
-	_, client, sshClient := startServer(t)
-
-	session, err := sshClient.NewSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := session.Shell(); err == nil {
-		t.Fatal("shell request succeeded")
-	}
-	_ = session.Close()
-	if connection, err := sshClient.Dial("tcp", "example.com:80"); err == nil {
-		_ = connection.Close()
-		t.Fatal("TCP forwarding succeeded")
-	}
+	client := startServer(t, facetfs.NewMemFS())
 
 	if err := client.Mkdir("/dir"); err != nil {
 		t.Fatal(err)
@@ -119,6 +100,10 @@ func TestSFTPWorkflow(t *testing.T) {
 	if err := client.PosixRename("/dir/file", "/dir/renamed"); err != nil {
 		t.Fatal(err)
 	}
+	// SSH_FXP_RENAME must refuse to replace an existing target.
+	if err := client.Rename("/dir/renamed", "/dir/link"); err == nil {
+		t.Fatal("Rename onto an existing target succeeded")
+	}
 	if err := client.Remove("/dir/link"); err != nil {
 		t.Fatal(err)
 	}
@@ -130,188 +115,108 @@ func TestSFTPWorkflow(t *testing.T) {
 	}
 }
 
-func TestWebDAVAndSFTPShareState(t *testing.T) {
-	server, client, _ := startServer(t)
-	handler, err := webdav.New(server, webdav.Options{
-		ExportID: "data",
-		Authenticate: func(context.Context, *http.Request) (facetfs.Principal, error) {
-			return facetfs.Principal{Subject: "user"}, nil
-		},
-	})
+// A FileSystem without the optional interfaces serves core operations and
+// refuses the gated ones.
+func TestOptionalInterfaceGating(t *testing.T) {
+	client := startServer(t, coreOnly{facetfs.NewMemFS()})
+
+	file, err := client.Create("/file")
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPut, "/shared", bytes.NewBufferString("shared data"))
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusCreated {
-		t.Fatalf("WebDAV PUT = %d: %s", response.Code, response.Body.String())
-	}
-	file, err := client.Open("/shared")
-	if err != nil {
+	if _, err := file.Write([]byte("data")); err != nil {
 		t.Fatal(err)
-	}
-	contents, err := io.ReadAll(file)
-	_ = file.Close()
-	if err != nil || string(contents) != "shared data" {
-		t.Fatalf("SFTP read = %q, %v", contents, err)
-	}
-	if err := client.PosixRename("/shared", "/moved"); err != nil {
-		t.Fatal(err)
-	}
-	request = httptest.NewRequest(http.MethodGet, "/moved", nil)
-	response = httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK || response.Body.String() != "shared data" {
-		t.Fatalf("WebDAV GET = %d, %q", response.Code, response.Body.String())
-	}
-}
-
-func TestWebDAVLockBlocksSFTPWrite(t *testing.T) {
-	server, client, _ := startServer(t)
-	handler, err := webdav.New(server, webdav.Options{
-		ExportID: "data",
-		Authenticate: func(context.Context, *http.Request) (facetfs.Principal, error) {
-			return facetfs.Principal{Subject: "user"}, nil
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	dav := func(method, target, body string, headers map[string]string) *httptest.ResponseRecorder {
-		request := httptest.NewRequest(method, target, bytes.NewBufferString(body))
-		for name, value := range headers {
-			request.Header.Set(name, value)
-		}
-		response := httptest.NewRecorder()
-		handler.ServeHTTP(response, request)
-		return response
-	}
-
-	if response := dav(http.MethodPut, "/doc", "original", nil); response.Code != http.StatusCreated {
-		t.Fatalf("WebDAV PUT = %d: %s", response.Code, response.Body.String())
-	}
-	lockBody := `<?xml version="1.0" encoding="utf-8"?>` +
-		`<lockinfo xmlns="DAV:"><lockscope><exclusive/></lockscope>` +
-		`<locktype><write/></locktype><owner>tester</owner></lockinfo>`
-	lock := dav("LOCK", "/doc", lockBody, nil)
-	if lock.Code != http.StatusOK {
-		t.Fatalf("WebDAV LOCK = %d: %s", lock.Code, lock.Body.String())
-	}
-	token := strings.Trim(lock.Header().Get("Lock-Token"), "<>")
-
-	// The WebDAV exclusive lock must block an SFTP write and rename.
-	file, err := client.OpenFile("/doc", os.O_WRONLY)
-	if err == nil {
-		_, err = file.WriteAt([]byte("x"), 0)
-		_ = file.Close()
-	}
-	if err == nil {
-		t.Fatal("SFTP write succeeded while WebDAV lock was held")
-	}
-	if err := client.PosixRename("/doc", "/moved"); err == nil {
-		t.Fatal("SFTP rename succeeded while WebDAV lock was held")
-	}
-
-	// After UNLOCK the SFTP write proceeds.
-	if response := dav("UNLOCK", "/doc", "", map[string]string{"Lock-Token": "<" + token + ">"}); response.Code != http.StatusNoContent {
-		t.Fatalf("WebDAV UNLOCK = %d: %s", response.Code, response.Body.String())
-	}
-	file, err = client.OpenFile("/doc", os.O_WRONLY)
-	if err != nil {
-		t.Fatalf("SFTP open after unlock = %v", err)
-	}
-	if _, err := file.WriteAt([]byte("Y"), 0); err != nil {
-		t.Fatalf("SFTP write after unlock = %v", err)
 	}
 	if err := file.Close(); err != nil {
-		t.Fatalf("SFTP close after unlock = %v", err)
+		t.Fatal(err)
+	}
+	if err := client.Symlink("file", "/link"); err == nil {
+		t.Fatal("Symlink succeeded without SymlinkFS")
+	}
+	if _, err := client.StatVFS("/"); err == nil {
+		t.Fatal("StatVFS succeeded without StatVFSFS")
+	}
+	if err := client.Chmod("/file", 0o600); err == nil {
+		t.Fatal("Chmod succeeded without SetStatFS")
+	}
+	// Lstat falls back to Stat rather than failing.
+	if info, err := client.Lstat("/file"); err != nil || info.Size() != 4 {
+		t.Fatalf("Lstat fallback = %v, %v", info, err)
 	}
 }
 
-func TestPublicKeyAuthentication(t *testing.T) {
-	_, _, clientKey := keyPair(t)
-	hostSigner, hostPublicKey, _ := keyPair(t)
-	core, err := facetfs.New(t.Context(), facetfs.Config{
-		Authorizer: facetfs.AuthorizerFunc(func(context.Context, facetfs.Request, facetfs.AccessCheck) error { return nil }),
-		Exports:    []facetfs.Export{{ID: "data", Name: "Data", Backend: memfs.New()}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	server, err := serversftp.New(core, serversftp.Options{
-		ExportID: "data", HostKeys: []ssh.Signer{hostSigner},
-		AuthenticatePublicKey: func(context.Context, string, ssh.PublicKey, net.Addr) (facetfs.Principal, error) {
-			return facetfs.Principal{}, errors.New("denied")
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- server.Serve(ctx, listener) }()
-	_, err = ssh.Dial("tcp", listener.Addr().String(), &ssh.ClientConfig{
-		User: "user", Auth: []ssh.AuthMethod{ssh.PublicKeys(clientKey)},
-		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
-			if !bytes.Equal(key.Marshal(), hostPublicKey.Marshal()) {
-				return errors.New("unexpected host key")
-			}
-			return nil
-		},
-		Timeout: 5 * time.Second,
-	})
-	if err == nil {
-		t.Fatal("authentication succeeded")
-	}
-	cancel()
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-}
+// coreOnly hides every optional interface of the wrapped FileSystem.
+type coreOnly struct{ facetfs.FileSystem }
 
-func startServer(t *testing.T) (*facetfs.Server, *clientsftp.Client, *ssh.Client) {
+// startServer runs a minimal SSH server that delegates the sftp subsystem to
+// sftp.Server.Serve, and returns a connected pkg/sftp client. The SSH plumbing
+// is what an application embedding this package writes itself.
+func startServer(t *testing.T, fsys facetfs.FileSystem) *clientsftp.Client {
 	t.Helper()
-	hostSigner, hostPublicKey, clientSigner := keyPair(t)
-	core, err := facetfs.New(t.Context(), facetfs.Config{
-		Authorizer: facetfs.AuthorizerFunc(func(_ context.Context, request facetfs.Request, _ facetfs.AccessCheck) error {
-			if request.Principal.Subject != "user" {
-				return facetfs.ErrAccessDenied
+	hostSigner, clientSigner := keyPair(t)
+
+	config := &ssh.ServerConfig{
+		PublicKeyCallback: func(metadata ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
+			if metadata.User() != "user" || !bytes.Equal(key.Marshal(), clientSigner.PublicKey().Marshal()) {
+				return nil, errors.New("public key rejected")
 			}
-			return nil
-		}),
-		Exports: []facetfs.Export{{ID: "data", Name: "Data", Backend: memfs.New()}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	server, err := serversftp.New(core, serversftp.Options{
-		ExportID: "data", HostKeys: []ssh.Signer{hostSigner},
-		AuthenticatePublicKey: func(_ context.Context, user string, key ssh.PublicKey, _ net.Addr) (facetfs.Principal, error) {
-			if user != "user" || !bytes.Equal(key.Marshal(), clientSigner.PublicKey().Marshal()) {
-				return facetfs.Principal{}, errors.New("denied")
-			}
-			return facetfs.Principal{Subject: "user", Name: user, Method: "publickey"}, nil
+			return &ssh.Permissions{}, nil
 		},
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
+	config.AddHostKey(hostSigner)
+
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan error, 1)
-	go func() { done <- server.Serve(ctx, listener) }()
+	var serving sync.WaitGroup
+	serving.Go(func() {
+		connection, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		sshConnection, channels, requests, err := ssh.NewServerConn(connection, config)
+		if err != nil {
+			return
+		}
+		defer sshConnection.Close()
+		go ssh.DiscardRequests(requests)
+		for channel := range channels {
+			if channel.ChannelType() != "session" {
+				_ = channel.Reject(ssh.UnknownChannelType, "unsupported channel")
+				continue
+			}
+			accepted, channelRequests, err := channel.Accept()
+			if err != nil {
+				continue
+			}
+			serving.Go(func() {
+				defer accepted.Close()
+				for channelRequest := range channelRequests {
+					var subsystem struct{ Name string }
+					if channelRequest.Type != "subsystem" || ssh.Unmarshal(channelRequest.Payload, &subsystem) != nil || subsystem.Name != "sftp" {
+						_ = channelRequest.Reply(false, nil)
+						continue
+					}
+					if err := channelRequest.Reply(true, nil); err != nil {
+						return
+					}
+					server := &serversftp.Server{FileSystem: fsys}
+					if err := server.Serve(ctx, accepted); err != nil && ctx.Err() == nil {
+						t.Errorf("Serve: %v", err)
+					}
+					return
+				}
+			})
+		}
+	})
+
 	sshClient, err := ssh.Dial("tcp", listener.Addr().String(), &ssh.ClientConfig{
 		User: "user", Auth: []ssh.AuthMethod{ssh.PublicKeys(clientSigner)},
 		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
-			if !bytes.Equal(key.Marshal(), hostPublicKey.Marshal()) {
+			if !bytes.Equal(key.Marshal(), hostSigner.PublicKey().Marshal()) {
 				return errors.New("unexpected host key")
 			}
 			return nil
@@ -331,15 +236,14 @@ func startServer(t *testing.T) (*facetfs.Server, *clientsftp.Client, *ssh.Client
 	t.Cleanup(func() {
 		_ = client.Close()
 		_ = sshClient.Close()
+		_ = listener.Close()
 		cancel()
-		if err := <-done; err != nil {
-			t.Errorf("Serve: %v", err)
-		}
+		serving.Wait()
 	})
-	return core, client, sshClient
+	return client
 }
 
-func keyPair(t *testing.T) (ssh.Signer, ssh.PublicKey, ssh.Signer) {
+func keyPair(t *testing.T) (host, client ssh.Signer) {
 	t.Helper()
 	_, hostPrivate, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
@@ -357,5 +261,5 @@ func keyPair(t *testing.T) (ssh.Signer, ssh.PublicKey, ssh.Signer) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return hostSigner, hostSigner.PublicKey(), clientSigner
+	return hostSigner, clientSigner
 }

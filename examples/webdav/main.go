@@ -1,3 +1,7 @@
+// Command webdav serves a directory over WebDAV behind HTTP basic
+// authentication. It shows the application-owned side of the split: the app
+// runs the HTTP server, terminates TLS, and authenticates requests; the
+// webdav.Handler only speaks the protocol.
 package main
 
 import (
@@ -15,13 +19,12 @@ import (
 	"time"
 
 	"github.com/sirrobot01/facetfs"
-	"github.com/sirrobot01/facetfs/backend/osfs"
 	"github.com/sirrobot01/facetfs/webdav"
 )
 
 func main() {
 	address := flag.String("addr", "127.0.0.1:8080", "listen address")
-	root := flag.String("root", ".", "directory to export")
+	root := flag.String("root", ".", "directory to serve")
 	certificate := flag.String("tls-cert", "", "TLS certificate file")
 	privateKey := flag.String("tls-key", "", "TLS private key file")
 	flag.Parse()
@@ -34,48 +37,14 @@ func main() {
 	if (*certificate == "") != (*privateKey == "") {
 		log.Fatal("-tls-cert and -tls-key must be provided together")
 	}
-	usernameHash := sha256.Sum256([]byte(username))
-	passwordHash := sha256.Sum256([]byte(password))
 
-	backend, err := osfs.New(*root)
-	if err != nil {
-		log.Fatal(err)
-	}
-	runtime, err := facetfs.New(context.Background(), facetfs.Config{
-		Exports: []facetfs.Export{{
-			ID:        "data",
-			Name:      "Data",
-			Backend:   backend,
-			Protocols: []facetfs.Protocol{facetfs.ProtocolWebDAV},
-		}},
-		Authorizer: facetfs.AuthorizerFunc(func(_ context.Context, request facetfs.Request, _ facetfs.AccessCheck) error {
-			if request.Principal.Subject != username {
-				return facetfs.ErrAccessDenied
-			}
-			return nil
-		}),
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	handler, err := webdav.New(runtime, webdav.Options{
-		ExportID:           "data",
-		Prefix:             "/dav",
-		AllowInsecureBasic: *certificate == "",
-		Authenticate: func(_ context.Context, request *http.Request) (facetfs.Principal, error) {
-			providedUser, providedPassword, ok := request.BasicAuth()
-			providedUserHash := sha256.Sum256([]byte(providedUser))
-			providedPasswordHash := sha256.Sum256([]byte(providedPassword))
-			userMatch := subtle.ConstantTimeCompare(providedUserHash[:], usernameHash[:])
-			passwordMatch := subtle.ConstantTimeCompare(providedPasswordHash[:], passwordHash[:])
-			if !ok || userMatch&passwordMatch != 1 {
-				return facetfs.Principal{}, facetfs.ErrAuthenticationRequired
-			}
-			return facetfs.Principal{Subject: username, Name: username, Method: "basic"}, nil
+	handler := &webdav.Handler{
+		Prefix:     "/dav",
+		FileSystem: facetfs.Dir(*root),
+		LockSystem: webdav.NewMemLS(),
+		Logger: func(r *http.Request, err error) {
+			log.Printf("%s %s: %v", r.Method, r.URL.Path, err)
 		},
-	})
-	if err != nil {
-		log.Fatal(err)
 	}
 
 	listener, err := net.Listen("tcp", *address)
@@ -91,7 +60,7 @@ func main() {
 	}
 
 	server := &http.Server{
-		Handler:           handler,
+		Handler:           basicAuth(username, password, handler),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       time.Minute,
 	}
@@ -113,4 +82,23 @@ func main() {
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		log.Fatal(err)
 	}
+}
+
+// basicAuth wraps handler with constant-time HTTP basic authentication.
+func basicAuth(username, password string, handler http.Handler) http.Handler {
+	usernameHash := sha256.Sum256([]byte(username))
+	passwordHash := sha256.Sum256([]byte(password))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		providedUser, providedPassword, ok := r.BasicAuth()
+		providedUserHash := sha256.Sum256([]byte(providedUser))
+		providedPasswordHash := sha256.Sum256([]byte(providedPassword))
+		userMatch := subtle.ConstantTimeCompare(providedUserHash[:], usernameHash[:])
+		passwordMatch := subtle.ConstantTimeCompare(providedPasswordHash[:], passwordHash[:])
+		if !ok || userMatch&passwordMatch != 1 {
+			w.Header().Set("WWW-Authenticate", `Basic realm="facetfs"`)
+			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	})
 }

@@ -1,24 +1,29 @@
+// Command sftp serves a directory over SFTP. It shows the application-owned
+// side of the split: the app runs the SSH server, authenticates public keys,
+// and accepts session channels; the sftp.Server only speaks the protocol on
+// each accepted channel.
 package main
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/sirrobot01/facetfs"
-	"github.com/sirrobot01/facetfs/backend/osfs"
 	facetftp "github.com/sirrobot01/facetfs/sftp"
 	"golang.org/x/crypto/ssh"
 )
 
 func main() {
 	address := flag.String("addr", "127.0.0.1:2022", "listen address")
-	root := flag.String("root", ".", "directory to export")
+	root := flag.String("root", ".", "directory to serve")
 	hostKeyPath := flag.String("host-key", "", "SSH host private key file")
 	authorizedKeysPath := flag.String("authorized-keys", "", "OpenSSH authorized keys file")
 	flag.Parse()
@@ -34,68 +39,114 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	authorizedKeysData, err := os.ReadFile(*authorizedKeysPath)
+	authorizedKeys, err := parseAuthorizedKeys(*authorizedKeysPath)
 	if err != nil {
 		log.Fatal(err)
-	}
-	authorizedKeys := make(map[string]struct{})
-	for len(bytes.TrimSpace(authorizedKeysData)) > 0 {
-		key, _, _, remaining, err := ssh.ParseAuthorizedKey(authorizedKeysData)
-		if err != nil {
-			log.Fatal(err)
-		}
-		authorizedKeys[string(key.Marshal())] = struct{}{}
-		authorizedKeysData = remaining
-	}
-	if len(authorizedKeys) == 0 {
-		log.Fatal("authorized-keys contains no public keys")
 	}
 
-	backend, err := osfs.New(*root)
-	if err != nil {
-		log.Fatal(err)
-	}
-	runtime, err := facetfs.New(context.Background(), facetfs.Config{
-		Exports: []facetfs.Export{{
-			ID:        "data",
-			Name:      "Data",
-			Backend:   backend,
-			Protocols: []facetfs.Protocol{facetfs.ProtocolSFTP},
-		}},
-		Authorizer: facetfs.AuthorizerFunc(func(_ context.Context, request facetfs.Request, _ facetfs.AccessCheck) error {
-			if request.Principal.Subject == "" {
-				return facetfs.ErrAccessDenied
-			}
-			return nil
-		}),
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-	server, err := facetftp.New(runtime, facetftp.Options{
-		ExportID: "data",
-		HostKeys: []ssh.Signer{hostKey},
-		AuthenticatePublicKey: func(_ context.Context, username string, key ssh.PublicKey, _ net.Addr) (facetfs.Principal, error) {
+	config := &ssh.ServerConfig{
+		PublicKeyCallback: func(_ ssh.ConnMetadata, key ssh.PublicKey) (*ssh.Permissions, error) {
 			if _, ok := authorizedKeys[string(key.Marshal())]; !ok {
-				return facetfs.Principal{}, facetfs.ErrAuthenticationRequired
+				return nil, errors.New("public key rejected")
 			}
-			return facetfs.Principal{Subject: username, Name: username, Method: "publickey"}, nil
+			return &ssh.Permissions{}, nil
 		},
-		OnConnectionError: func(err error) {
-			log.Printf("connection closed: %v", err)
-		},
-	})
-	if err != nil {
-		log.Fatal(err)
 	}
+	config.AddHostKey(hostKey)
+
+	server := &facetftp.Server{FileSystem: facetfs.Dir(*root)}
+
 	listener, err := net.Listen("tcp", *address)
 	if err != nil {
 		log.Fatal(err)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go func() {
+		<-ctx.Done()
+		_ = listener.Close()
+	}()
+
 	log.Printf("serving %s at %s", *root, listener.Addr())
-	if err := server.Serve(ctx, listener); err != nil {
-		log.Fatal(err)
+	for {
+		connection, err := listener.Accept()
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Fatal(err)
+		}
+		go func() {
+			if err := serveConn(ctx, connection, config, server); err != nil && ctx.Err() == nil {
+				log.Printf("connection closed: %v", err)
+			}
+		}()
 	}
+}
+
+// serveConn runs the SSH handshake on connection and delegates each session
+// channel's sftp subsystem to server.Serve.
+func serveConn(ctx context.Context, connection net.Conn, config *ssh.ServerConfig, server *facetftp.Server) error {
+	defer connection.Close()
+	if err := connection.SetDeadline(time.Now().Add(15 * time.Second)); err != nil {
+		return err
+	}
+	sshConnection, channels, requests, err := ssh.NewServerConn(connection, config)
+	if err != nil {
+		return err
+	}
+	defer sshConnection.Close()
+	if err := connection.SetDeadline(time.Time{}); err != nil {
+		return err
+	}
+	go ssh.DiscardRequests(requests)
+
+	for channel := range channels {
+		if channel.ChannelType() != "session" {
+			_ = channel.Reject(ssh.UnknownChannelType, "unsupported channel")
+			continue
+		}
+		accepted, channelRequests, err := channel.Accept()
+		if err != nil {
+			continue
+		}
+		go func() {
+			defer accepted.Close()
+			for channelRequest := range channelRequests {
+				var subsystem struct{ Name string }
+				if channelRequest.Type != "subsystem" || ssh.Unmarshal(channelRequest.Payload, &subsystem) != nil || subsystem.Name != "sftp" {
+					_ = channelRequest.Reply(false, nil)
+					continue
+				}
+				if err := channelRequest.Reply(true, nil); err != nil {
+					return
+				}
+				if err := server.Serve(ctx, accepted); err != nil && ctx.Err() == nil {
+					log.Printf("sftp session: %v", err)
+				}
+				return
+			}
+		}()
+	}
+	return nil
+}
+
+func parseAuthorizedKeys(path string) (map[string]struct{}, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	keys := make(map[string]struct{})
+	for len(bytes.TrimSpace(data)) > 0 {
+		key, _, _, remaining, err := ssh.ParseAuthorizedKey(data)
+		if err != nil {
+			return nil, err
+		}
+		keys[string(key.Marshal())] = struct{}{}
+		data = remaining
+	}
+	if len(keys) == 0 {
+		return nil, errors.New("authorized-keys contains no public keys")
+	}
+	return keys, nil
 }

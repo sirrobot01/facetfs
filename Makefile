@@ -1,10 +1,9 @@
 .PHONY: all build check fmt test race vet clean
 
-all: check build
+all: check
 
 build:
-	mkdir -p bin
-	CGO_ENABLED=0 go build -trimpath -o bin/facetfsd ./cmd/facetfsd
+	CGO_ENABLED=0 go build ./...
 
 check: fmt vet test
 
@@ -21,4 +20,4 @@ race:
 	go test -race ./...
 
 clean:
-	rm -f bin/facetfsd coverage.out coverage.html
+	rm -f coverage.out coverage.html

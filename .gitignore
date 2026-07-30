@@ -12,7 +12,6 @@ data/
 /nntpmock
 dist/
 tmp/**
-!tmp/FACETFS-PRD.md
 torrents.json
 logs/**
 auth.json

@@ -1,17 +1,20 @@
-// Package webdav provides an HTTP handler for FacetFS exports.
+// Package webdav provides a WebDAV handler (RFC 4918) that serves a
+// facetfs.FileSystem over HTTP. The caller owns the HTTP server, transport
+// security, and authentication.
 package webdav
 
 import (
 	"context"
-	"crypto/rand"
+	"errors"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"path"
 	"strings"
+	"time"
 
 	"github.com/sirrobot01/facetfs"
 	"github.com/sirrobot01/facetfs/internal/names"
-	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -20,77 +23,63 @@ const (
 	defaultResponseLimit = 16 << 20
 )
 
-// Authenticator establishes the principal for an HTTP request.
-type Authenticator func(context.Context, *http.Request) (facetfs.Principal, error)
+// errCrossHost reports a COPY or MOVE Destination on another server.
+var errCrossHost = errors.New("webdav: destination is on another host")
 
-// Options configures a WebDAV handler for one export.
-type Options struct {
-	ExportID           string
-	Prefix             string
-	Authenticate       Authenticator
-	AllowInsecureBasic bool
-	MaxBodyBytes       int64
-	MaxWalkNodes       int
-	MaxResponseBytes   int64
-}
+// errWalkLimit reports that a traversal visited more entries than the handler
+// allows.
+var errWalkLimit = errors.New("webdav: too many entries")
 
-// Handler serves one FacetFS export over WebDAV.
+// Handler serves a FileSystem over WebDAV. The zero value of every optional
+// field is usable.
 type Handler struct {
-	server             *facetfs.Server
-	exportID           string
-	prefix             string
-	authenticate       Authenticator
-	allowInsecureBasic bool
-	maxBodyBytes       int64
-	maxWalkNodes       int
-	maxResponseBytes   int64
+	// Prefix is the URL path prefix stripped from request paths. Optional.
+	Prefix string
+	// FileSystem is the served filesystem. Required.
+	FileSystem facetfs.FileSystem
+	// LockSystem supports WebDAV Class 2 locking. When nil, LOCK and UNLOCK
+	// return 405 Method Not Allowed and OPTIONS advertises class 1 only.
+	LockSystem LockSystem
+	// MaxBodyBytes caps a PUT body. Zero means 1 GiB.
+	MaxBodyBytes int64
+	// MaxWalkNodes caps the entries visited by PROPFIND and COPY traversals.
+	// Zero means 10 000.
+	MaxWalkNodes int
+	// MaxResponseBytes caps a PROPFIND response. Zero means 16 MiB.
+	MaxResponseBytes int64
+	// Logger, if set, receives errors that produced a 5xx response.
+	Logger func(*http.Request, error)
 }
 
-// New validates options and constructs a WebDAV handler.
-func New(server *facetfs.Server, options Options) (*Handler, error) {
-	if server == nil || options.ExportID == "" {
-		return nil, facetfs.ErrInvalid
+func (h *Handler) maxBodyBytes() int64 {
+	if h.MaxBodyBytes > 0 {
+		return h.MaxBodyBytes
 	}
-	export, ok := server.Export(options.ExportID)
-	if !ok || !export.Supports(facetfs.ProtocolWebDAV) {
-		return nil, facetfs.ErrNotFound
+	return defaultBodyLimit
+}
+
+func (h *Handler) maxWalkNodes() int {
+	if h.MaxWalkNodes > 0 {
+		return h.MaxWalkNodes
 	}
-	prefix := path.Clean("/" + strings.Trim(options.Prefix, "/"))
-	if prefix == "." {
-		prefix = "/"
+	return defaultTraversalSize
+}
+
+func (h *Handler) maxResponseBytes() int64 {
+	if h.MaxResponseBytes > 0 {
+		return h.MaxResponseBytes
 	}
-	if options.MaxBodyBytes <= 0 {
-		options.MaxBodyBytes = defaultBodyLimit
-	}
-	if options.MaxWalkNodes <= 0 {
-		options.MaxWalkNodes = defaultTraversalSize
-	}
-	if options.MaxResponseBytes <= 0 {
-		options.MaxResponseBytes = defaultResponseLimit
-	}
-	return &Handler{
-		server:             server,
-		exportID:           options.ExportID,
-		prefix:             prefix,
-		authenticate:       options.Authenticate,
-		allowInsecureBasic: options.AllowInsecureBasic,
-		maxBodyBytes:       options.MaxBodyBytes,
-		maxWalkNodes:       options.MaxWalkNodes,
-		maxResponseBytes:   options.MaxResponseBytes,
-	}, nil
+	return defaultResponseLimit
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	request, err := h.request(r)
-	if err != nil {
-		h.writeError(w, err)
+	if h.FileSystem == nil {
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
-	defer h.server.CloseSession(context.WithoutCancel(r.Context()), request.SessionID)
-	request.LockTokens = ifTokens(r.Header.Get("If"))
 	segments, err := h.segments(r.URL)
 	if err != nil {
-		h.writeError(w, err)
+		h.writeError(w, r, err)
 		return
 	}
 
@@ -98,63 +87,74 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case http.MethodOptions:
 		h.options(w)
 	case http.MethodGet, http.MethodHead:
-		h.get(w, r, request, segments)
+		h.get(w, r, segments)
 	case http.MethodPut:
-		h.put(w, r, request, segments)
+		h.put(w, r, segments)
 	case "MKCOL":
-		h.mkcol(w, r, request, segments)
+		h.mkcol(w, r, segments)
 	case http.MethodDelete:
-		h.remove(w, r, request, segments)
+		h.remove(w, r, segments)
 	case "MOVE":
-		h.move(w, r, request, segments)
+		h.move(w, r, segments)
 	case "COPY":
-		h.copy(w, r, request, segments)
+		h.copy(w, r, segments)
 	case "PROPFIND":
-		h.propfind(w, r, request, segments)
+		h.propfind(w, r, segments)
 	case "LOCK":
-		h.lock(w, r, request, segments)
+		if h.LockSystem == nil {
+			h.methodNotAllowed(w)
+			return
+		}
+		h.lock(w, r, segments)
 	case "UNLOCK":
-		h.unlock(w, r, request, segments)
+		if h.LockSystem == nil {
+			h.methodNotAllowed(w)
+			return
+		}
+		h.unlock(w, r, segments)
 	default:
-		w.Header().Set("Allow", allowMethods)
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+		h.methodNotAllowed(w)
 	}
 }
 
-const allowMethods = "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, COPY, MOVE, LOCK, UNLOCK"
+func (h *Handler) methodNotAllowed(w http.ResponseWriter) {
+	w.Header().Set("Allow", h.allowMethods())
+	http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+}
 
-func (h *Handler) request(r *http.Request) (facetfs.Request, error) {
-	if strings.HasPrefix(strings.ToLower(r.Header.Get("Authorization")), "basic ") && r.TLS == nil && !h.allowInsecureBasic {
-		return facetfs.Request{}, facetfs.ErrAccessDenied
+func (h *Handler) allowMethods() string {
+	methods := "OPTIONS, PROPFIND, GET, HEAD, PUT, MKCOL, DELETE, COPY, MOVE"
+	if h.LockSystem != nil {
+		methods += ", LOCK, UNLOCK"
 	}
-	var principal facetfs.Principal
-	if h.authenticate != nil {
-		var err error
-		principal, err = h.authenticate(r.Context(), r)
-		if err != nil {
-			return facetfs.Request{}, err
-		}
+	return methods
+}
+
+// fsPath joins validated segments into the slash-rooted path passed to the
+// FileSystem.
+func fsPath(segments []string) string {
+	return "/" + strings.Join(segments, "/")
+}
+
+func (h *Handler) prefixPath() string {
+	prefix := path.Clean("/" + strings.Trim(h.Prefix, "/"))
+	if prefix == "." {
+		return "/"
 	}
-	return facetfs.Request{
-		Principal:  principal,
-		Protocol:   facetfs.ProtocolWebDAV,
-		ClientID:   r.RemoteAddr,
-		SessionID:  rand.Text(),
-		RemoteAddr: stringAddr(r.RemoteAddr),
-	}, nil
+	return prefix
 }
 
 func (h *Handler) segments(u *url.URL) ([]string, error) {
 	escaped := strings.ToLower(u.EscapedPath())
 	if strings.Contains(escaped, "%2f") || strings.Contains(escaped, "%5c") {
-		return nil, facetfs.ErrInvalid
+		return nil, fs.ErrInvalid
 	}
 	requestPath := u.Path
-	if h.prefix != "/" {
-		if requestPath != h.prefix && !strings.HasPrefix(requestPath, h.prefix+"/") {
-			return nil, facetfs.ErrNotFound
+	if prefix := h.prefixPath(); prefix != "/" {
+		if requestPath != prefix && !strings.HasPrefix(requestPath, prefix+"/") {
+			return nil, fs.ErrNotExist
 		}
-		requestPath = strings.TrimPrefix(requestPath, h.prefix)
+		requestPath = strings.TrimPrefix(requestPath, prefix)
 	}
 	requestPath = strings.Trim(requestPath, "/")
 	if requestPath == "" {
@@ -162,96 +162,72 @@ func (h *Handler) segments(u *url.URL) ([]string, error) {
 	}
 	segments := strings.Split(requestPath, "/")
 	for _, segment := range segments {
-		if err := names.Validate(segment); err != nil || strings.Contains(segment, "\\") || !norm.NFC.IsNormalString(segment) {
-			if err == nil {
-				err = facetfs.ErrInvalid
-			}
+		if err := names.Validate(segment); err != nil {
 			return nil, err
+		}
+		if strings.Contains(segment, "\\") {
+			return nil, fs.ErrInvalid
 		}
 	}
 	return segments, nil
 }
 
-func (h *Handler) resolve(ctx context.Context, request facetfs.Request, segments []string) (facetfs.ObjectRef, facetfs.Attr, error) {
-	object, attr, err := h.server.Root(ctx, request, h.exportID)
-	if err != nil {
-		return facetfs.ObjectRef{}, facetfs.Attr{}, err
-	}
-	for _, segment := range segments {
-		object, attr, err = h.server.Lookup(ctx, request, object, segment)
-		if err != nil {
-			return facetfs.ObjectRef{}, facetfs.Attr{}, err
-		}
-	}
-	return object, attr, nil
-}
-
-func (h *Handler) parent(ctx context.Context, request facetfs.Request, segments []string) (facetfs.ObjectRef, string, error) {
-	if len(segments) == 0 {
-		return facetfs.ObjectRef{}, "", facetfs.ErrInvalid
-	}
-	parent, _, err := h.resolve(ctx, request, segments[:len(segments)-1])
-	return parent, segments[len(segments)-1], err
-}
-
 func (h *Handler) options(w http.ResponseWriter) {
-	w.Header().Set("DAV", "1, 2")
-	w.Header().Set("Allow", allowMethods)
+	dav := "1"
+	if h.LockSystem != nil {
+		dav = "1, 2"
+	}
+	w.Header().Set("DAV", dav)
+	w.Header().Set("Allow", h.allowMethods())
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (h *Handler) writeError(w http.ResponseWriter, err error) {
-	status := http.StatusInternalServerError
-	switch facetfs.CodeOf(err) {
-	case facetfs.ErrAuthenticationRequired:
-		status = http.StatusUnauthorized
-	case facetfs.ErrAccessDenied, facetfs.ErrReadOnly:
-		status = http.StatusForbidden
-	case facetfs.ErrNotFound, facetfs.ErrStaleObject:
+func (h *Handler) writeError(w http.ResponseWriter, r *http.Request, err error) {
+	var status int
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
 		status = http.StatusNotFound
-	case facetfs.ErrExists, facetfs.ErrNotEmpty, facetfs.ErrBusy, facetfs.ErrStaleCursor:
+	case errors.Is(err, fs.ErrPermission):
+		status = http.StatusForbidden
+	case errors.Is(err, fs.ErrExist):
 		status = http.StatusConflict
-	case facetfs.ErrInvalid, facetfs.ErrNameTooLong, facetfs.ErrNotDirectory, facetfs.ErrIsDirectory:
+	case errors.Is(err, fs.ErrInvalid):
 		status = http.StatusBadRequest
-	case facetfs.ErrLockConflict, facetfs.ErrWouldBlock:
+	case errors.Is(err, ErrLocked), errors.Is(err, ErrTooManyLocks):
 		status = http.StatusLocked
-	case facetfs.ErrNoSpace, facetfs.ErrQuota:
-		status = http.StatusInsufficientStorage
-	case facetfs.ErrTooManyOpenFiles:
-		status = http.StatusServiceUnavailable
-	case facetfs.ErrNotSupported:
-		status = http.StatusNotImplemented
-	case facetfs.ErrCrossDevice:
+	case errors.Is(err, errCrossHost):
 		status = http.StatusBadGateway
-	case facetfs.ErrCanceled:
+	case errors.Is(err, errWalkLimit):
+		status = http.StatusInsufficientStorage
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		return
-	case facetfs.ErrTimeout:
-		status = http.StatusGatewayTimeout
-	case facetfs.ErrIO, facetfs.ErrCorrupt:
+	default:
 		status = http.StatusInternalServerError
+		if h.Logger != nil {
+			h.Logger(r, err)
+		}
 	}
 	http.Error(w, http.StatusText(status), status)
+}
+
+func (h *Handler) now() time.Time {
+	return time.Now()
 }
 
 func destinationURL(r *http.Request) (*url.URL, error) {
 	destination := r.Header.Get("Destination")
 	if destination == "" {
-		return nil, facetfs.ErrInvalid
+		return nil, fs.ErrInvalid
 	}
 	u, err := url.Parse(destination)
 	if err != nil || u.User != nil || u.Fragment != "" {
-		return nil, facetfs.ErrInvalid
+		return nil, fs.ErrInvalid
 	}
 	if u.IsAbs() && u.Scheme != "http" && u.Scheme != "https" {
-		return nil, facetfs.ErrCrossDevice
+		return nil, errCrossHost
 	}
 	if u.IsAbs() && !strings.EqualFold(u.Host, r.Host) {
-		return nil, facetfs.ErrCrossDevice
+		return nil, errCrossHost
 	}
 	return u, nil
 }
-
-type stringAddr string
-
-func (a stringAddr) Network() string { return "tcp" }
-func (a stringAddr) String() string  { return string(a) }

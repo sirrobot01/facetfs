@@ -1,102 +1,95 @@
 # FacetFS
 
-**One filesystem. Many protocols.**
+**Embeddable file-protocol handlers for Go.**
 
-FacetFS is an embeddable, pure-Go server framework for exposing a filesystem
-through multiple network protocols:
+FacetFS is a set of thin protocol packages in the style of
+`golang.org/x/net/webdav`. You implement one small filesystem interface. Each
+package serves it over one protocol. You own the transport, the listener, and
+authentication. FacetFS only speaks the protocol.
 
-- NFSv4
-- SMB2/SMB3
-- SFTP for SSHFS
-- WebDAV
+There is no server framework, no daemon, and no shared runtime. Each protocol
+package is independent. Import only what you use.
 
-FacetFS is being built around a protocol-neutral backend API and one coordinator
-for file handles, opens, locks, identity, permissions, and cache invalidation.
-Applications will implement the backend once and choose which protocols to
-serve.
+| Package  | Protocol       | You provide                            | Status      |
+| -------- | -------------- | -------------------------------------- | ----------- |
+| `webdav` | WebDAV (HTTP)  | an `http.Server` and auth middleware   | usable      |
+| `sftp`   | SFTP           | an SSH server and an accepted channel  | usable      |
+| `nfs4`   | NFSv4.0        | a `net.Listener`                       | planned     |
+| `smb`    | SMB2/SMB3      | a `net.Listener`                       | planned     |
 
-> [!IMPORTANT]
-> The core runtime, reference backends, WebDAV handler, and SSH/SFTP server are
-> implemented. NFSv4 and SMB are not implemented yet.
+## The filesystem interface
 
-## Development
-
-The project requires Go 1.26.2 and supports static, CGO-disabled builds.
-
-```sh
-make check
-make build
-./bin/facetfsd -version
-```
-
-## Usage
-
-FacetFS applications assemble four pieces:
-
-1. a backend such as `backend/osfs` or `backend/memfs`;
-2. one or more exports;
-3. an application-owned authorizer;
-4. a WebDAV or SFTP frontend with its authentication callback.
-
-The default authorizer denies access, so applications must provide an explicit
-authorization policy. Frontend authentication establishes a `Principal`; the
-shared authorizer then decides which filesystem operations that principal may
-perform.
-
-### WebDAV
-
-The WebDAV frontend is an `http.Handler`, so it can be mounted in an existing
-HTTP server or behind a reverse proxy:
+The root package defines one path-based contract. Implement it once. Serve it
+over any protocol.
 
 ```go
-handler, err := webdav.New(runtime, webdav.Options{
-    ExportID:     "data",
-    Prefix:       "/dav",
-    Authenticate: authenticateRequest,
-})
-if err != nil {
-    return err
+type FileSystem interface {
+    Mkdir(ctx context.Context, name string, perm fs.FileMode) error
+    OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error)
+    RemoveAll(ctx context.Context, name string) error
+    Rename(ctx context.Context, oldName, newName string) error
+    Stat(ctx context.Context, name string) (fs.FileInfo, error)
 }
-
-httpServer := &http.Server{
-    Addr:              ":8443",
-    Handler:           handler,
-    ReadHeaderTimeout: 10 * time.Second,
-}
-return httpServer.ListenAndServeTLS("cert.pem", "key.pem")
 ```
 
-`Authenticate` is application-defined and can establish identities from Basic
-authentication, bearer tokens, mTLS, or an existing session. Plaintext Basic
-authentication is rejected unless `AllowInsecureBasic` is explicitly enabled.
+Return errors that satisfy `errors.Is` against the `io/fs` sentinels:
+`fs.ErrNotExist`, `fs.ErrExist`, `fs.ErrPermission`, and `fs.ErrInvalid`.
 
-### SFTP
+Two implementations ship with the module:
 
-The SFTP frontend requires caller-supplied host keys and a public-key verifier:
+- `facetfs.Dir("/srv/data")` serves a native directory tree. It uses `os.Root`,
+  so symbolic links cannot escape the tree.
+- `facetfs.NewMemFS()` is an in-memory filesystem for tests and prototypes.
+
+Optional interfaces unlock protocol features:
+
+| Interface   | Methods                      | Unlocks                        |
+| ----------- | ---------------------------- | ------------------------------ |
+| `SymlinkFS` | `Symlink, Readlink, Lstat`   | symlinks over SFTP and WebDAV  |
+| `SetStatFS` | `Chmod, Chtimes, Truncate`   | SFTP `setstat`                 |
+| `StatVFSFS` | `StatVFS`                    | SFTP `statvfs`                 |
+
+A filesystem without an interface still works. The protocol packages refuse
+only the requests that need it.
+
+## WebDAV
+
+`webdav.Handler` is an `http.Handler`. Mount it on your own server, behind
+your own authentication:
 
 ```go
-server, err := sftp.New(runtime, sftp.Options{
-    ExportID: "data",
-    HostKeys: hostKeys,
-    AuthenticatePublicKey: authenticatePublicKey,
-})
-if err != nil {
-    return err
+handler := &webdav.Handler{
+    Prefix:     "/dav",
+    FileSystem: facetfs.Dir("/srv/data"),
+    LockSystem: webdav.NewMemLS(), // omit for class 1 only
 }
-
-listener, err := net.Listen("tcp", "127.0.0.1:2022")
-if err != nil {
-    return err
-}
-return server.Serve(ctx, listener)
+http.Handle("/dav/", yourAuthMiddleware(handler))
+log.Fatal(http.ListenAndServeTLS(":8443", "cert.pem", "key.pem", nil))
 ```
 
-Shell, exec, PTY, agent-forwarding, and TCP-forwarding requests are rejected.
-Only the SFTP subsystem is served.
+The handler implements RFC 4918 class 1 and 2, with exclusive Depth-0 write
+locks. See [examples/webdav](./examples/webdav) for a complete program with
+basic authentication and TLS.
+
+## SFTP
+
+`sftp.Server` serves one already-authenticated stream. Run your own SSH server
+with `golang.org/x/crypto/ssh`. When a session channel requests the `sftp`
+subsystem, pass the channel to `Serve`:
+
+```go
+server := &sftp.Server{FileSystem: facetfs.Dir("/srv/data")}
+
+// Inside your SSH session-channel loop:
+if err := server.Serve(ctx, channel); err != nil {
+    log.Printf("sftp session: %v", err)
+}
+```
+
+See [examples/sftp](./examples/sftp) for a complete program with host keys and
+`authorized_keys` verification.
 
 ## Examples
-
-The examples export a local directory through the reference OS backend.
 
 Run the loopback WebDAV example:
 
@@ -109,8 +102,8 @@ curl -u demo:change-me -T ./README.md http://127.0.0.1:8080/dav/README.md
 curl -u demo:change-me http://127.0.0.1:8080/dav/README.md
 ```
 
-Plaintext mode is restricted to loopback. Supply `-tls-cert` and `-tls-key` for
-a TLS listener.
+Plaintext mode is restricted to loopback. Supply `-tls-cert` and `-tls-key`
+for a TLS listener.
 
 Run the SFTP example:
 
@@ -127,37 +120,27 @@ go run ./examples/sftp \
 sftp -P 2022 127.0.0.1
 ```
 
-These programs are starting points for embedding. Production applications
-should provide durable host keys, TLS, authorization policy, operational
-timeouts, and logging appropriate to their environment.
+The examples are starting points. Production applications must provide durable
+host keys, TLS, authorization policy, timeouts, and logging.
+
+## Development
+
+The project requires Go 1.26 and builds without CGO.
+
+```sh
+make check
+make race
+```
 
 ## Goals
 
 - Pure Go with no CGO requirement
-- Embeddable protocol servers and an optional standalone daemon
-- Stable, capability-driven backend interfaces
-- Cross-protocol locking and namespace coherence
-- Bounded wire decoders designed for untrusted input
-- Interoperability tests using real operating-system clients
+- Thin, independent, embeddable protocol packages
+- One filesystem contract shared by every protocol
+- Bounded wire handling designed for untrusted input
+- Interoperability tests using real clients
 
-## Current status
-
-The repository currently includes:
-
-- core backend, handle, request, attribute, capability, and canonical-error
-  contracts;
-- in-memory and local-filesystem backends with reusable contract tests;
-- export validation and capability snapshots;
-- shared open reservations, byte-range locks, namespace locking, state,
-  authorization, and change notifications;
-- a bounded WebDAV handler for file, collection, range, conditional, copy,
-  move, and property workflows;
-- an SSH/SFTP v3 server with public-key authentication, subsystem isolation,
-  coordinated handles, symlinks, POSIX rename, and filesystem statistics;
-- static-build, vet, test, and race-test automation.
-
-APIs and protocol profiles are not yet stable. NFSv4 and SMB packages remain
-placeholders.
+APIs are not stable before v0.1.
 
 ## License
 
