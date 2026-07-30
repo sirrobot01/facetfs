@@ -45,10 +45,12 @@ type Server struct {
 	// Logger, if set, receives per-connection faults from Serve.
 	Logger func(error)
 
-	initOnce sync.Once
-	initErr  error
-	fhKey    []byte
-	verifier [8]byte
+	initOnce  sync.Once
+	initErr   error
+	fh        *fhCodec
+	verifier  [8]byte
+	supported bitmap
+	state     *stateStore
 }
 
 func (s *Server) init() error {
@@ -57,14 +59,17 @@ func (s *Server) init() error {
 			s.initErr = errors.New("nfs4: FileSystem is required")
 			return
 		}
-		s.fhKey = s.HandleKey
-		if len(s.fhKey) == 0 {
-			s.fhKey = make([]byte, 32)
-			if _, err := rand.Read(s.fhKey); err != nil {
+		key := s.HandleKey
+		if len(key) == 0 {
+			key = make([]byte, 32)
+			if _, err := rand.Read(key); err != nil {
 				s.initErr = err
 				return
 			}
 		}
+		s.fh = newFHCodec(key)
+		s.supported = s.supportedAttrs()
+		s.state = newStateStore(s.lease())
 		if _, err := rand.Read(s.verifier[:]); err != nil {
 			s.initErr = err
 		}

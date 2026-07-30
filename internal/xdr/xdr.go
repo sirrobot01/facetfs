@@ -33,6 +33,9 @@ func NewDecoder(buf []byte) *Decoder {
 func (d *Decoder) Err() error     { return d.err }
 func (d *Decoder) Remaining() int { return len(d.buf) - d.off }
 
+// Fail marks the decoder failed, as if a read had encountered err.
+func (d *Decoder) Fail(err error) { d.fail(err) }
+
 func (d *Decoder) fail(err error) {
 	if d.err == nil {
 		d.err = err

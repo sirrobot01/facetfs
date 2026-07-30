@@ -25,7 +25,26 @@ type compound struct {
 type opFunc func(*compound, *xdr.Decoder, *xdr.Encoder) nfsStat
 
 // opTable is indexed by op number; nil entries answer NFS4ERR_NOTSUPP.
-var opTable [40]opFunc
+var opTable = [40]opFunc{
+	opAccess:             (*compound).access,
+	opGetAttr:            (*compound).getAttr,
+	opGetFH:              (*compound).getFH,
+	opLookup:             (*compound).lookup,
+	opLookupP:            (*compound).lookupP,
+	opNVerify:            (*compound).nVerify,
+	opPutFH:              (*compound).putFH,
+	opPutPubFH:           (*compound).putRootFH,
+	opPutRootFH:          (*compound).putRootFH,
+	opReadDir:            (*compound).readDir,
+	opReadLink:           (*compound).readLink,
+	opRenew:              (*compound).renew,
+	opRestoreFH:          (*compound).restoreFH,
+	opSaveFH:             (*compound).saveFH,
+	opSecInfo:            (*compound).secInfo,
+	opSetClientID:        (*compound).setClientID,
+	opSetClientIDConfirm: (*compound).setClientIDConfirm,
+	opVerify:             (*compound).verify,
+}
 
 // compound executes one COMPOUND call (RFC 7530 §15.2). ok=false means the
 // top-level arguments did not decode: the RPC layer answers GARBAGE_ARGS.

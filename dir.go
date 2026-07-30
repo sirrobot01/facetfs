@@ -70,6 +70,15 @@ func (d Dir) Stat(ctx context.Context, name string) (fs.FileInfo, error) {
 	return root.Stat(d.resolve(name))
 }
 
+func (d Dir) Link(ctx context.Context, oldName, newName string) error {
+	root, err := d.root()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.Link(d.resolve(oldName), d.resolve(newName))
+}
+
 func (d Dir) Symlink(ctx context.Context, oldName, newName string) error {
 	root, err := d.root()
 	if err != nil {

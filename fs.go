@@ -46,6 +46,12 @@ type SymlinkFS interface {
 	Lstat(ctx context.Context, name string) (fs.FileInfo, error)
 }
 
+// LinkFS is implemented by filesystems that support hard links.
+type LinkFS interface {
+	FileSystem
+	Link(ctx context.Context, oldName, newName string) error
+}
+
 // SetStatFS is implemented by filesystems that can change metadata by path.
 // SFTP uses it to serve setstat requests.
 type SetStatFS interface {
