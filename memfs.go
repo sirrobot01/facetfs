@@ -40,6 +40,17 @@ type memNode struct {
 	children map[string]*memNode
 }
 
+// touch advances the node's modification time. The time is strictly
+// increasing across mutations so that ModTime-derived entity tags change even
+// on clocks too coarse to separate two writes.
+func (n *memNode) touch() {
+	now := time.Now()
+	if !now.After(n.modTime) {
+		now = n.modTime.Add(time.Nanosecond)
+	}
+	n.modTime = now
+}
+
 func (n *memNode) info(name string) fs.FileInfo {
 	size := int64(len(n.data))
 	if n.mode&fs.ModeSymlink != 0 {
@@ -139,7 +150,7 @@ func (m *memFS) Mkdir(ctx context.Context, name string, perm fs.FileMode) error 
 		modTime:  time.Now(),
 		children: map[string]*memNode{},
 	}
-	parent.modTime = time.Now()
+	parent.touch()
 	return nil
 }
 
@@ -163,7 +174,7 @@ func (m *memFS) OpenFile(ctx context.Context, name string, flag int, perm fs.Fil
 		}
 		node = &memNode{mode: perm.Perm(), modTime: time.Now()}
 		parent.children[base] = node
-		parent.modTime = time.Now()
+		parent.touch()
 	default:
 		return nil, pathError("open", name, err)
 	}
@@ -173,7 +184,7 @@ func (m *memFS) OpenFile(ctx context.Context, name string, flag int, perm fs.Fil
 	}
 	if flag&os.O_TRUNC != 0 && !node.mode.IsDir() {
 		node.data = nil
-		node.modTime = time.Now()
+		node.touch()
 	}
 	return &memFile{
 		fsys:     m,
@@ -200,7 +211,7 @@ func (m *memFS) RemoveAll(ctx context.Context, name string) error {
 	}
 	if _, ok := parent.children[base]; ok {
 		delete(parent.children, base)
-		parent.modTime = time.Now()
+		parent.touch()
 	}
 	return nil
 }
@@ -232,9 +243,8 @@ func (m *memFS) Rename(ctx context.Context, oldName, newName string) error {
 	}
 	delete(oldParent.children, oldBase)
 	newParent.children[newBase] = node
-	now := time.Now()
-	oldParent.modTime = now
-	newParent.modTime = now
+	oldParent.touch()
+	newParent.touch()
 	return nil
 }
 
@@ -273,7 +283,7 @@ func (m *memFS) Symlink(ctx context.Context, oldname, newname string) error {
 		modTime: time.Now(),
 		link:    oldname,
 	}
-	parent.modTime = time.Now()
+	parent.touch()
 	return nil
 }
 
@@ -351,7 +361,7 @@ func (n *memNode) setSize(size int64) {
 	} else {
 		n.data = append(n.data, make([]byte, size-int64(len(n.data)))...)
 	}
-	n.modTime = time.Now()
+	n.touch()
 }
 
 type memFile struct {
@@ -459,7 +469,7 @@ func (n *memNode) writeAt(p []byte, off int64) int {
 		n.data = append(n.data, make([]byte, grow)...)
 	}
 	copy(n.data[off:], p)
-	n.modTime = time.Now()
+	n.touch()
 	return len(p)
 }
 

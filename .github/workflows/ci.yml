@@ -42,7 +42,7 @@ jobs:
         run: go test ./...
       - name: Race tests
         run: go test -race ./...
-      - name: Static daemon build
+      - name: Static build
         env:
           CGO_ENABLED: "0"
-        run: go build -trimpath ./cmd/facetfsd
+        run: go build -trimpath ./...
