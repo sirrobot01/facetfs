@@ -9,5 +9,7 @@
 // fs.ErrInvalid. Dir serves a native directory tree. NewMemFS returns an
 // in-memory filesystem for tests and prototypes.
 //
-// FacetFS is under active development. Public APIs are not stable before v0.1.
+// The FileSystem contract is frozen as of v0.1. Optional capability
+// interfaces may be added in later releases; existing interfaces do not
+// change.
 package facetfs
