@@ -5,30 +5,20 @@ import (
 	"errors"
 	"io"
 	"io/fs"
-	"math"
+	"os"
 	"path"
-	"slices"
 	"strings"
-	"time"
 
 	pkgsftp "github.com/pkg/sftp"
 	"github.com/sirrobot01/facetfs"
 	"github.com/sirrobot01/facetfs/internal/names"
-	"golang.org/x/text/unicode/norm"
 )
 
-const (
-	maxSymlinkDepth = 40
-	directoryPage   = 256
-	allShares       = facetfs.ShareRead | facetfs.ShareWrite | facetfs.ShareDelete
-)
+const directoryPage = 256
 
 type handler struct {
 	ctx                 context.Context
-	server              *facetfs.Server
-	exportID            string
-	request             facetfs.Request
-	atomicRename        bool
+	fs                  facetfs.FileSystem
 	maxDirectoryEntries int
 }
 
@@ -45,217 +35,271 @@ func (h *handler) OpenFile(request *pkgsftp.Request) (pkgsftp.WriterAtReaderAt, 
 }
 
 func (h *handler) open(request *pkgsftp.Request) (*openFile, error) {
-	flags := request.Pflags()
-	access := facetfs.OpenAccess(0)
-	if flags.Read {
-		access |= facetfs.OpenRead
-	}
-	if flags.Write || flags.Append {
-		access |= facetfs.OpenWrite
-	}
-	if access == 0 {
-		return nil, pkgsftp.ErrSSHFxBadMessage
-	}
-	options := facetfs.OpenOptions{Access: access, Share: allShares}
-	object, _, _, err := h.resolve(request.Context(), request.Filepath, true)
-	var handle facetfs.Handle
-	if err == nil {
-		if flags.Creat && flags.Excl {
-			return nil, pkgsftp.ErrSSHFxFailure
-		}
-		handle, err = h.server.Open(request.Context(), h.request, object, options)
-	} else if errors.Is(err, facetfs.ErrNotFound) && flags.Creat {
-		parent, name, parentErr := h.parent(request.Context(), request.Filepath)
-		if parentErr != nil {
-			return nil, wireError(parentErr)
-		}
-		create := facetfs.CreateOptions{Open: options, Exclusive: flags.Excl}
-		attributeFlags := request.AttrFlags()
-		if attributeFlags.Permissions {
-			mode := request.Attributes().FileMode().Perm()
-			create.Attr.Mode = &mode
-		}
-		_, handle, _, err = h.server.Create(request.Context(), h.request, parent, name, create)
-	}
+	p, err := cleanPath(request.Filepath)
 	if err != nil {
 		return nil, wireError(err)
 	}
-	opened := &openFile{ctx: request.Context(), server: h.server, request: h.request, handle: handle, append: flags.Append}
-	opened.mutable, _ = handle.(facetfs.MutableHandle)
-	if access&facetfs.OpenWrite != 0 && opened.mutable == nil {
-		_ = handle.Close(context.WithoutCancel(request.Context()))
-		return nil, pkgsftp.ErrSSHFxOpUnsupported
+	flags := request.Pflags()
+	read := flags.Read
+	write := flags.Write || flags.Append
+	var flag int
+	switch {
+	case read && write:
+		flag = os.O_RDWR
+	case read:
+		flag = os.O_RDONLY
+	case write:
+		flag = os.O_WRONLY
+	default:
+		return nil, pkgsftp.ErrSSHFxBadMessage
+	}
+	if flags.Append {
+		flag |= os.O_APPEND
+	}
+	if flags.Creat {
+		flag |= os.O_CREATE
 	}
 	if flags.Trunc {
-		size := int64(0)
-		if _, err := opened.mutable.SetAttr(request.Context(), facetfs.SetAttr{Size: &size}); err != nil {
-			_ = opened.Close()
-			return nil, wireError(err)
-		}
+		flag |= os.O_TRUNC
 	}
-	return opened, nil
+	if flags.Excl {
+		flag |= os.O_EXCL
+	}
+	perm := fs.FileMode(0o644)
+	if request.AttrFlags().Permissions {
+		perm = request.Attributes().FileMode().Perm()
+	}
+	file, err := h.fs.OpenFile(request.Context(), p, flag, perm)
+	if err != nil {
+		return nil, wireError(err)
+	}
+	return newOpenFile(file, flags.Append), nil
 }
 
 func (h *handler) Filelist(request *pkgsftp.Request) (pkgsftp.ListerAt, error) {
+	p, err := cleanPath(request.Filepath)
+	if err != nil {
+		return nil, wireError(err)
+	}
 	switch request.Method {
 	case "List":
-		object, attr, _, err := h.resolve(request.Context(), request.Filepath, true)
-		if err != nil {
-			return nil, wireError(err)
-		}
-		if attr.Type != facetfs.NodeTypeDirectory {
-			return nil, wireError(facetfs.ErrNotDirectory)
-		}
-		handle, err := h.server.Open(request.Context(), h.request, object, facetfs.OpenOptions{Access: facetfs.OpenRead, Share: allShares})
-		if err != nil {
-			return nil, wireError(err)
-		}
-		entries := make([]fs.FileInfo, 0, directoryPage)
-		var cursor facetfs.DirCursor
-		for {
-			page, err := h.server.ReadDir(request.Context(), h.request, object, cursor, directoryPage)
-			if err != nil {
-				_ = handle.Close(context.WithoutCancel(request.Context()))
-				return nil, wireError(err)
-			}
-			for _, entry := range page.Entries {
-				if len(entries) >= h.maxDirectoryEntries {
-					_ = handle.Close(context.WithoutCancel(request.Context()))
-					return nil, pkgsftp.ErrSSHFxFailure
-				}
-				entries = append(entries, fileInfo{name: entry.Name, attr: entry.Attr})
-			}
-			if page.Next == "" {
-				return &fileList{entries: entries, handle: handle, ctx: request.Context()}, nil
-			}
-			cursor = page.Next
-		}
+		return h.list(request.Context(), p)
 	case "Stat":
-		_, attr, segments, err := h.resolve(request.Context(), request.Filepath, true)
+		fi, err := h.fs.Stat(request.Context(), p)
 		if err != nil {
 			return nil, wireError(err)
 		}
-		return fileList{entries: []fs.FileInfo{fileInfo{name: baseName(segments), attr: attr}}}, nil
+		return fileList{fi}, nil
 	default:
 		return nil, pkgsftp.ErrSSHFxOpUnsupported
+	}
+}
+
+func (h *handler) list(ctx context.Context, p string) (pkgsftp.ListerAt, error) {
+	fi, err := h.fs.Stat(ctx, p)
+	if err != nil {
+		return nil, wireError(err)
+	}
+	if !fi.IsDir() {
+		return nil, wireError(fs.ErrInvalid)
+	}
+	dir, err := h.fs.OpenFile(ctx, p, os.O_RDONLY, 0)
+	if err != nil {
+		return nil, wireError(err)
+	}
+	defer dir.Close()
+	var entries []fs.FileInfo
+	for {
+		page, err := dir.Readdir(directoryPage)
+		entries = append(entries, page...)
+		if len(entries) > h.maxDirectoryEntries {
+			return nil, pkgsftp.ErrSSHFxFailure
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return fileList(entries), nil
+			}
+			return nil, wireError(err)
+		}
+		if len(page) == 0 {
+			return fileList(entries), nil
+		}
 	}
 }
 
 func (h *handler) Lstat(request *pkgsftp.Request) (pkgsftp.ListerAt, error) {
-	_, attr, segments, err := h.resolve(request.Context(), request.Filepath, false)
+	p, err := cleanPath(request.Filepath)
 	if err != nil {
 		return nil, wireError(err)
 	}
-	return fileList{entries: []fs.FileInfo{fileInfo{name: baseName(segments), attr: attr}}}, nil
+	fi, err := h.lstat(request.Context(), p)
+	if err != nil {
+		return nil, wireError(err)
+	}
+	return fileList{fi}, nil
+}
+
+// lstat uses SymlinkFS.Lstat when the filesystem supports it and otherwise
+// falls back to Stat.
+func (h *handler) lstat(ctx context.Context, p string) (fs.FileInfo, error) {
+	if symlinks, ok := h.fs.(facetfs.SymlinkFS); ok {
+		return symlinks.Lstat(ctx, p)
+	}
+	return h.fs.Stat(ctx, p)
 }
 
 func (h *handler) Readlink(name string) (string, error) {
-	object, attr, _, err := h.resolve(h.ctx, name, false)
+	symlinks, ok := h.fs.(facetfs.SymlinkFS)
+	if !ok {
+		return "", pkgsftp.ErrSSHFxOpUnsupported
+	}
+	p, err := cleanPath(name)
 	if err != nil {
 		return "", wireError(err)
 	}
-	if attr.Type != facetfs.NodeTypeSymlink {
-		return "", wireError(facetfs.ErrInvalid)
-	}
-	target, err := h.server.Readlink(h.ctx, h.request, object)
+	target, err := symlinks.Readlink(h.ctx, p)
 	return target, wireError(err)
 }
 
 func (h *handler) RealPath(name string) (string, error) {
-	_, _, segments, err := h.resolve(h.ctx, name, true)
+	p, err := cleanPath(name)
 	if err != nil {
 		return "", wireError(err)
 	}
-	if len(segments) == 0 {
-		return "/", nil
-	}
-	return "/" + strings.Join(segments, "/"), nil
+	return p, nil
 }
 
 func (h *handler) Filecmd(request *pkgsftp.Request) error {
 	ctx := request.Context()
+	p, err := cleanPath(request.Filepath)
+	if err != nil {
+		return wireError(err)
+	}
 	switch request.Method {
 	case "Setstat":
-		object, _, _, err := h.resolve(ctx, request.Filepath, true)
-		if err != nil {
-			return wireError(err)
-		}
-		set, err := setAttributes(request)
-		if err != nil {
-			return err
-		}
-		_, err = h.server.SetAttr(ctx, h.request, object, set)
-		return wireError(err)
+		return h.setstat(ctx, request, p)
 	case "Mkdir":
-		parent, name, err := h.parent(ctx, request.Filepath)
+		perm := fs.FileMode(0o755)
+		if request.AttrFlags().Permissions {
+			perm = request.Attributes().FileMode().Perm()
+		}
+		return wireError(h.fs.Mkdir(ctx, p, perm))
+	case "Remove":
+		fi, err := h.lstat(ctx, p)
 		if err != nil {
 			return wireError(err)
 		}
-		set, err := setAttributes(request)
-		if err != nil {
-			return err
+		if fi.IsDir() {
+			return pkgsftp.ErrSSHFxFailure
 		}
-		_, _, err = h.server.Mkdir(ctx, h.request, parent, name, set)
-		return wireError(err)
-	case "Rmdir", "Remove":
-		parent, name, err := h.parent(ctx, request.Filepath)
-		if err != nil {
-			return wireError(err)
-		}
-		kind := facetfs.RemoveFile
-		if request.Method == "Rmdir" {
-			kind = facetfs.RemoveDirectory
-		}
-		return wireError(h.server.Remove(ctx, h.request, parent, name, kind))
+		return wireError(h.fs.RemoveAll(ctx, p))
+	case "Rmdir":
+		return h.rmdir(ctx, p)
 	case "Rename":
-		return h.rename(ctx, request.Filepath, request.Target, false)
-	case "Link":
-		object, _, _, err := h.resolve(ctx, request.Filepath, false)
+		target, err := cleanPath(request.Target)
 		if err != nil {
 			return wireError(err)
 		}
-		parent, name, err := h.parent(ctx, request.Target)
-		if err != nil {
-			return wireError(err)
+		// SSH_FXP_RENAME must not replace an existing target. The check is
+		// best-effort: the FileSystem's Rename is POSIX and replaces.
+		if _, err := h.lstat(ctx, target); err == nil {
+			return pkgsftp.ErrSSHFxFailure
 		}
-		return wireError(h.server.Link(ctx, h.request, object, parent, name))
+		return wireError(h.fs.Rename(ctx, p, target))
 	case "Symlink":
-		parent, name, err := h.parent(ctx, request.Target)
+		symlinks, ok := h.fs.(facetfs.SymlinkFS)
+		if !ok {
+			return pkgsftp.ErrSSHFxOpUnsupported
+		}
+		target, err := cleanPath(request.Target)
 		if err != nil {
 			return wireError(err)
 		}
-		_, _, err = h.server.Symlink(ctx, h.request, parent, name, request.Filepath, facetfs.SetAttr{})
-		return wireError(err)
+		return wireError(symlinks.Symlink(ctx, request.Filepath, target))
 	default:
 		return pkgsftp.ErrSSHFxOpUnsupported
 	}
 }
 
-func (h *handler) PosixRename(request *pkgsftp.Request) error {
-	if !h.atomicRename {
+func (h *handler) setstat(ctx context.Context, request *pkgsftp.Request, p string) error {
+	setstat, ok := h.fs.(facetfs.SetStatFS)
+	if !ok {
 		return pkgsftp.ErrSSHFxOpUnsupported
 	}
-	return h.rename(request.Context(), request.Filepath, request.Target, true)
+	flags := request.AttrFlags()
+	if flags.UidGid {
+		return pkgsftp.ErrSSHFxOpUnsupported
+	}
+	attributes := request.Attributes()
+	if flags.Size {
+		if attributes.Size > 1<<62 {
+			return pkgsftp.ErrSSHFxBadMessage
+		}
+		if err := setstat.Truncate(ctx, p, int64(attributes.Size)); err != nil {
+			return wireError(err)
+		}
+	}
+	if flags.Permissions {
+		if err := setstat.Chmod(ctx, p, attributes.FileMode().Perm()); err != nil {
+			return wireError(err)
+		}
+	}
+	if flags.Acmodtime {
+		if err := setstat.Chtimes(ctx, p, attributes.AccessTime(), attributes.ModTime()); err != nil {
+			return wireError(err)
+		}
+	}
+	return nil
 }
 
-func (h *handler) rename(ctx context.Context, source, target string, replace bool) error {
-	sourceParent, sourceName, err := h.parent(ctx, source)
+// rmdir removes an empty directory. The emptiness check and the removal are
+// separate FileSystem calls, so the operation is best-effort rather than
+// atomic.
+func (h *handler) rmdir(ctx context.Context, p string) error {
+	fi, err := h.fs.Stat(ctx, p)
 	if err != nil {
 		return wireError(err)
 	}
-	targetParent, targetName, err := h.parent(ctx, target)
+	if !fi.IsDir() {
+		return pkgsftp.ErrSSHFxFailure
+	}
+	dir, err := h.fs.OpenFile(ctx, p, os.O_RDONLY, 0)
 	if err != nil {
 		return wireError(err)
 	}
-	return wireError(h.server.Rename(ctx, h.request, sourceParent, sourceName, targetParent, targetName, facetfs.RenameOptions{Replace: replace}))
+	entries, err := dir.Readdir(1)
+	_ = dir.Close()
+	if err != nil && !errors.Is(err, io.EOF) {
+		return wireError(err)
+	}
+	if len(entries) > 0 {
+		return pkgsftp.ErrSSHFxFailure
+	}
+	return wireError(h.fs.RemoveAll(ctx, p))
+}
+
+func (h *handler) PosixRename(request *pkgsftp.Request) error {
+	source, err := cleanPath(request.Filepath)
+	if err != nil {
+		return wireError(err)
+	}
+	target, err := cleanPath(request.Target)
+	if err != nil {
+		return wireError(err)
+	}
+	return wireError(h.fs.Rename(request.Context(), source, target))
 }
 
 func (h *handler) StatVFS(request *pkgsftp.Request) (*pkgsftp.StatVFS, error) {
-	object, _, _, err := h.resolve(request.Context(), request.Filepath, true)
+	statvfs, ok := h.fs.(facetfs.StatVFSFS)
+	if !ok {
+		return nil, pkgsftp.ErrSSHFxOpUnsupported
+	}
+	p, err := cleanPath(request.Filepath)
 	if err != nil {
 		return nil, wireError(err)
 	}
-	stat, err := h.server.StatFS(request.Context(), h.request, object)
+	stat, err := statvfs.StatVFS(request.Context(), p)
 	if err != nil {
 		return nil, wireError(err)
 	}
@@ -269,186 +313,55 @@ func (h *handler) StatVFS(request *pkgsftp.Request) (*pkgsftp.StatVFS, error) {
 		Files:   stat.TotalFiles,
 		Ffree:   stat.FreeFiles,
 		Favail:  stat.FreeFiles,
-		Namemax: stat.NameMax,
+		Namemax: uint64(stat.NameMax),
 	}, nil
 }
 
-func (h *handler) resolve(ctx context.Context, name string, followFinal bool) (facetfs.ObjectRef, facetfs.Attr, []string, error) {
-	pending, err := pathSegments(name)
-	if err != nil {
-		return facetfs.ObjectRef{}, facetfs.Attr{}, nil, err
-	}
-	object, attr, err := h.server.Root(ctx, h.request, h.exportID)
-	if err != nil {
-		return facetfs.ObjectRef{}, facetfs.Attr{}, nil, err
-	}
-	resolved := make([]string, 0, len(pending))
-	for followed := 0; len(pending) > 0; {
-		segment := pending[0]
-		pending = pending[1:]
-		child, childAttr, err := h.server.Lookup(ctx, h.request, object, segment)
-		if err != nil {
-			return facetfs.ObjectRef{}, facetfs.Attr{}, nil, err
-		}
-		if childAttr.Type != facetfs.NodeTypeSymlink || len(pending) == 0 && !followFinal {
-			object, attr = child, childAttr
-			resolved = append(resolved, segment)
-			continue
-		}
-		followed++
-		if followed > maxSymlinkDepth {
-			return facetfs.ObjectRef{}, facetfs.Attr{}, nil, facetfs.ErrInvalid
-		}
-		target, err := h.server.Readlink(ctx, h.request, child)
-		if err != nil {
-			return facetfs.ObjectRef{}, facetfs.Attr{}, nil, err
-		}
-		base := resolved
-		if strings.HasPrefix(target, "/") {
-			base = nil
-		}
-		combined := slices.Concat(base, strings.Split(target, "/"), pending)
-		pending, err = pathSegments("/" + strings.Join(combined, "/"))
-		if err != nil {
-			return facetfs.ObjectRef{}, facetfs.Attr{}, nil, err
-		}
-		object, attr, err = h.server.Root(ctx, h.request, h.exportID)
-		if err != nil {
-			return facetfs.ObjectRef{}, facetfs.Attr{}, nil, err
-		}
-		resolved = resolved[:0]
-	}
-	return object, attr, resolved, nil
-}
-
-func (h *handler) parent(ctx context.Context, name string) (facetfs.ObjectRef, string, error) {
-	segments, err := pathSegments(name)
-	if err != nil || len(segments) == 0 {
-		if err == nil {
-			err = facetfs.ErrInvalid
-		}
-		return facetfs.ObjectRef{}, "", err
-	}
-	parentPath := "/" + strings.Join(segments[:len(segments)-1], "/")
-	parent, attr, _, err := h.resolve(ctx, parentPath, true)
-	if err != nil {
-		return facetfs.ObjectRef{}, "", err
-	}
-	if attr.Type != facetfs.NodeTypeDirectory {
-		return facetfs.ObjectRef{}, "", facetfs.ErrNotDirectory
-	}
-	return parent, segments[len(segments)-1], nil
-}
-
-func pathSegments(name string) ([]string, error) {
+// cleanPath normalizes an SFTP path to a slash-rooted cleaned path and
+// validates each segment.
+func cleanPath(name string) (string, error) {
 	cleaned := path.Clean("/" + name)
 	if cleaned == "/" {
-		return nil, nil
+		return cleaned, nil
 	}
-	segments := strings.Split(strings.TrimPrefix(cleaned, "/"), "/")
-	for _, segment := range segments {
-		if err := names.Validate(segment); err != nil || strings.Contains(segment, "\\") || !norm.NFC.IsNormalString(segment) {
-			return nil, facetfs.ErrInvalid
+	for segment := range strings.SplitSeq(cleaned[1:], "/") {
+		if err := names.Validate(segment); err != nil {
+			return "", err
+		}
+		if strings.Contains(segment, "\\") {
+			return "", fs.ErrInvalid
 		}
 	}
-	return segments, nil
-}
-
-func setAttributes(request *pkgsftp.Request) (facetfs.SetAttr, error) {
-	flags := request.AttrFlags()
-	if flags.UidGid {
-		return facetfs.SetAttr{}, pkgsftp.ErrSSHFxOpUnsupported
-	}
-	attributes := request.Attributes()
-	var set facetfs.SetAttr
-	if flags.Size {
-		if attributes.Size > math.MaxInt64 {
-			return facetfs.SetAttr{}, pkgsftp.ErrSSHFxBadMessage
-		}
-		size := int64(attributes.Size)
-		set.Size = &size
-	}
-	if flags.Permissions {
-		mode := attributes.FileMode().Perm()
-		set.Mode = &mode
-	}
-	if flags.Acmodtime {
-		accessed := attributes.AccessTime()
-		modified := attributes.ModTime()
-		set.AccessedAt = &accessed
-		set.ModifiedAt = &modified
-	}
-	return set, nil
+	return cleaned, nil
 }
 
 func wireError(err error) error {
-	if err == nil {
+	switch {
+	case err == nil:
 		return nil
-	}
-	switch facetfs.CodeOf(err) {
-	case facetfs.ErrNotFound, facetfs.ErrStaleObject:
+	case errors.Is(err, io.EOF):
+		return err
+	case errors.Is(err, fs.ErrNotExist):
 		return pkgsftp.ErrSSHFxNoSuchFile
-	case facetfs.ErrAccessDenied, facetfs.ErrAuthenticationRequired, facetfs.ErrReadOnly,
-		facetfs.ErrLockConflict, facetfs.ErrWouldBlock:
+	case errors.Is(err, fs.ErrPermission):
 		return pkgsftp.ErrSSHFxPermissionDenied
-	case facetfs.ErrNotSupported:
-		return pkgsftp.ErrSSHFxOpUnsupported
-	case facetfs.ErrInvalid, facetfs.ErrNameTooLong:
+	case errors.Is(err, fs.ErrInvalid):
 		return pkgsftp.ErrSSHFxBadMessage
 	default:
 		return pkgsftp.ErrSSHFxFailure
 	}
 }
 
-func baseName(segments []string) string {
-	if len(segments) == 0 {
-		return "/"
-	}
-	return segments[len(segments)-1]
-}
-
-type fileInfo struct {
-	name string
-	attr facetfs.Attr
-}
-
-func (f fileInfo) Name() string       { return f.name }
-func (f fileInfo) Size() int64        { return f.attr.Size }
-func (f fileInfo) ModTime() time.Time { return f.attr.ModifiedAt }
-func (f fileInfo) IsDir() bool        { return f.attr.Type == facetfs.NodeTypeDirectory }
-func (f fileInfo) Sys() any           { return nil }
-
-func (f fileInfo) Mode() fs.FileMode {
-	mode := f.attr.Mode
-	switch f.attr.Type {
-	case facetfs.NodeTypeDirectory:
-		mode |= fs.ModeDir
-	case facetfs.NodeTypeSymlink:
-		mode |= fs.ModeSymlink
-	}
-	return mode
-}
-
-type fileList struct {
-	entries []fs.FileInfo
-	handle  facetfs.Handle
-	ctx     context.Context
-}
+// fileList serves directory entries and stat results to pkg/sftp.
+type fileList []fs.FileInfo
 
 func (l fileList) ListAt(destination []fs.FileInfo, offset int64) (int, error) {
-	if offset < 0 || offset >= int64(len(l.entries)) {
+	if offset < 0 || offset >= int64(len(l)) {
 		return 0, io.EOF
 	}
-	n := copy(destination, l.entries[offset:])
-	if int(offset)+n == len(l.entries) {
+	n := copy(destination, l[offset:])
+	if int(offset)+n == len(l) {
 		return n, io.EOF
 	}
 	return n, nil
-}
-
-func (l *fileList) Close() error {
-	if l.handle == nil {
-		return nil
-	}
-	return wireError(l.handle.Close(context.WithoutCancel(l.ctx)))
 }

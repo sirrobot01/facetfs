@@ -15,11 +15,10 @@ make build
 ```
 
 New wire decoders must bound request-controlled allocations and include fuzz
-coverage. Backend behavior should be added to the shared contract suite rather
-than tested only through one frontend.
+coverage. Protocol behavior should be tested at the protocol level, with a real
+client where practical.
 
-Public API, persistence, identity, locking, ACL, security-profile, and protocol
-capability changes should explain the tradeoffs in their issue or pull request
-description.
+Public API, locking, and protocol capability changes should explain the
+tradeoffs in their issue or pull request description.
 
 Do not describe experimental protocol support as compliant or conformant.

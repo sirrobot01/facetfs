@@ -2,10 +2,9 @@ package names
 
 import (
 	"errors"
+	"io/fs"
 	"strings"
 	"testing"
-
-	"github.com/sirrobot01/facetfs"
 )
 
 func TestValidate(t *testing.T) {
@@ -14,12 +13,12 @@ func TestValidate(t *testing.T) {
 		want error
 	}{
 		{"file", nil},
-		{"", facetfs.ErrInvalid},
-		{".", facetfs.ErrInvalid},
-		{"..", facetfs.ErrInvalid},
-		{"a/b", facetfs.ErrInvalid},
-		{string([]byte{0xff}), facetfs.ErrInvalid},
-		{strings.Repeat("a", 256), facetfs.ErrNameTooLong},
+		{"", fs.ErrInvalid},
+		{".", fs.ErrInvalid},
+		{"..", fs.ErrInvalid},
+		{"a/b", fs.ErrInvalid},
+		{string([]byte{0xff}), fs.ErrInvalid},
+		{strings.Repeat("a", 256), fs.ErrInvalid},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

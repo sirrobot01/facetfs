@@ -1,7 +1,7 @@
 # Security policy
 
-FacetFS is pre-release software and currently serves no network protocols. No
-version is supported for production use yet.
+FacetFS is pre-release software. No version is supported for production use
+yet.
 
 Please report suspected vulnerabilities privately to the repository maintainer
 instead of opening a public issue. Include the affected commit, impact,

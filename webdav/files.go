@@ -1,176 +1,94 @@
 package webdav
 
 import (
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
-	"strconv"
 	"strings"
-	"time"
-
-	"github.com/sirrobot01/facetfs"
 )
 
-const allShares = facetfs.ShareRead | facetfs.ShareWrite | facetfs.ShareDelete
-
-func (h *Handler) get(w http.ResponseWriter, r *http.Request, request facetfs.Request, segments []string) {
-	object, attr, err := h.resolve(r.Context(), request, segments)
+func (h *Handler) get(w http.ResponseWriter, r *http.Request, segments []string) {
+	p := fsPath(segments)
+	fi, err := h.FileSystem.Stat(r.Context(), p)
 	if err != nil {
-		h.writeError(w, err)
+		h.writeError(w, r, err)
 		return
 	}
-	if attr.Type == facetfs.NodeTypeDirectory {
-		http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
+	if fi.IsDir() {
+		h.methodNotAllowed(w)
 		return
 	}
-	etag := entityTag(object, attr)
-	if !readConditions(w, r, etag, attr.ModifiedAt) {
-		return
-	}
-	handle, err := h.server.Open(r.Context(), request, object, facetfs.OpenOptions{Access: facetfs.OpenRead, Share: allShares})
+	file, err := h.FileSystem.OpenFile(r.Context(), p, os.O_RDONLY, 0)
 	if err != nil {
-		h.writeError(w, err)
+		h.writeError(w, r, err)
 		return
 	}
-	defer handle.Close(r.Context())
-
-	rangeHeader := r.Header.Get("Range")
-	if rangeHeader != "" && !ifRangeMatches(r.Header.Get("If-Range"), etag, attr.ModifiedAt) {
-		rangeHeader = ""
-	}
-	offset, length, partial, err := byteRange(rangeHeader, attr.Size)
-	if err != nil {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", attr.Size))
-		http.Error(w, http.StatusText(http.StatusRequestedRangeNotSatisfiable), http.StatusRequestedRangeNotSatisfiable)
-		return
-	}
-	w.Header().Set("Accept-Ranges", "bytes")
-	w.Header().Set("Content-Length", strconv.FormatInt(length, 10))
-	w.Header().Set("ETag", etag)
-	w.Header().Set("Last-Modified", attr.ModifiedAt.UTC().Format(http.TimeFormat))
-	if partial {
-		w.Header().Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, offset+length-1, attr.Size))
-		w.WriteHeader(http.StatusPartialContent)
-	}
-	if r.Method == http.MethodHead || length == 0 {
-		return
-	}
-	buf := make([]byte, min(int64(64<<10), length))
-	for written := int64(0); written < length; {
-		chunk := min(int64(len(buf)), length-written)
-		n, readErr := handle.ReadAt(r.Context(), buf[:chunk], offset+written)
-		if n > 0 {
-			if _, err := w.Write(buf[:n]); err != nil {
-				return
-			}
-			written += int64(n)
-		}
-		if readErr != nil {
-			if !errors.Is(readErr, io.EOF) {
-				return
-			}
-			break
-		}
-	}
+	defer file.Close()
+	w.Header().Set("ETag", entityTag(fi))
+	http.ServeContent(w, r, fi.Name(), fi.ModTime(), file)
 }
 
-func (h *Handler) put(w http.ResponseWriter, r *http.Request, request facetfs.Request, segments []string) {
-	parent, name, err := h.parent(r.Context(), request, segments)
-	if err != nil {
-		h.writeError(w, err)
+func (h *Handler) put(w http.ResponseWriter, r *http.Request, segments []string) {
+	if len(segments) == 0 {
+		h.writeError(w, r, fs.ErrInvalid)
 		return
 	}
-	object, attr, lookupErr := h.server.Lookup(r.Context(), request, parent, name)
-	exists := lookupErr == nil
-	if lookupErr != nil && !errors.Is(lookupErr, facetfs.ErrNotFound) {
-		h.writeError(w, lookupErr)
+	p := fsPath(segments)
+	parent := fsPath(segments[:len(segments)-1])
+	fi, statErr := h.FileSystem.Stat(r.Context(), p)
+	exists := statErr == nil
+	if statErr != nil && !errors.Is(statErr, fs.ErrNotExist) {
+		h.writeError(w, r, statErr)
 		return
 	}
 	etag := ""
 	if exists {
-		if attr.Type == facetfs.NodeTypeDirectory {
-			h.writeError(w, facetfs.ErrIsDirectory)
+		if fi.IsDir() {
+			h.writeError(w, r, fs.ErrInvalid)
 			return
 		}
-		etag = entityTag(object, attr)
+		etag = entityTag(fi)
 	}
 	// A lock on the parent collection governs adding a member, so it is consulted
 	// whether or not the target itself exists.
-	locked := []facetfs.ObjectRef{parent}
+	governed := []string{parent}
 	if exists {
-		locked = append(locked, object)
+		governed = append(governed, p)
 	}
-	if !h.checkIf(w, r, segments, etag, locked...) {
+	if !h.checkIf(w, r, segments, etag, governed...) {
 		return
 	}
 	if !writeConditions(w, r, exists, etag) {
 		return
 	}
 
-	var handle facetfs.Handle
-	if exists {
-		handle, err = h.server.Open(r.Context(), request, object, facetfs.OpenOptions{Access: facetfs.OpenWrite, Share: allShares})
-	} else {
-		object, handle, _, err = h.server.Create(r.Context(), request, parent, name, facetfs.CreateOptions{
-			Exclusive: true,
-			Open:      facetfs.OpenOptions{Access: facetfs.OpenWrite, Share: allShares},
-		})
+	file, err := h.FileSystem.OpenFile(r.Context(), p, os.O_RDWR|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		h.writeError(w, r, err)
+		return
+	}
+	_, err = io.Copy(file, http.MaxBytesReader(w, r.Body, h.maxBodyBytes()))
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
 	}
 	if err != nil {
-		h.writeError(w, err)
-		return
-	}
-	defer handle.Close(r.Context())
-	mutable, ok := handle.(facetfs.MutableHandle)
-	if !ok {
-		h.writeError(w, facetfs.ErrNotSupported)
-		return
-	}
-	body := http.MaxBytesReader(w, r.Body, h.maxBodyBytes)
-	buf := make([]byte, 64<<10)
-	var offset int64
-	for {
-		n, readErr := body.Read(buf)
-		if n > 0 {
-			written, writeErr := mutable.WriteAt(r.Context(), buf[:n], offset)
-			offset += int64(written)
-			if writeErr != nil {
-				h.writeError(w, writeErr)
-				return
-			}
-			if written != n {
-				h.writeError(w, facetfs.ErrIO)
-				return
-			}
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
+			return
 		}
-		if readErr != nil {
-			if !errors.Is(readErr, io.EOF) {
-				var maxBytesError *http.MaxBytesError
-				if errors.As(readErr, &maxBytesError) {
-					http.Error(w, http.StatusText(http.StatusRequestEntityTooLarge), http.StatusRequestEntityTooLarge)
-					return
-				}
-				h.writeError(w, facetfs.ErrInvalid)
-				return
-			}
-			break
-		}
-	}
-	attr, err = mutable.SetAttr(r.Context(), facetfs.SetAttr{Size: &offset})
-	if err != nil {
-		h.writeError(w, err)
+		h.writeError(w, r, err)
 		return
 	}
-	if err := mutable.Flush(r.Context(), true); err != nil {
-		h.writeError(w, err)
-		return
+	if fi, err := h.FileSystem.Stat(r.Context(), p); err == nil {
+		w.Header().Set("ETag", entityTag(fi))
+		w.Header().Set("Last-Modified", fi.ModTime().UTC().Format(http.TimeFormat))
 	}
-	w.Header().Set("ETag", entityTag(object, attr))
-	w.Header().Set("Last-Modified", attr.ModifiedAt.UTC().Format(http.TimeFormat))
 	if exists {
 		w.WriteHeader(http.StatusNoContent)
 	} else {
@@ -178,108 +96,114 @@ func (h *Handler) put(w http.ResponseWriter, r *http.Request, request facetfs.Re
 	}
 }
 
-func (h *Handler) mkcol(w http.ResponseWriter, r *http.Request, request facetfs.Request, segments []string) {
+func (h *Handler) mkcol(w http.ResponseWriter, r *http.Request, segments []string) {
 	if r.ContentLength != 0 {
 		http.Error(w, http.StatusText(http.StatusUnsupportedMediaType), http.StatusUnsupportedMediaType)
 		return
 	}
-	parent, name, err := h.parent(r.Context(), request, segments)
-	if err != nil {
-		h.writeError(w, err)
+	if len(segments) == 0 {
+		h.writeError(w, r, fs.ErrInvalid)
 		return
 	}
 	// The collection does not exist yet, so only a lock on its parent governs it.
-	if !h.checkIf(w, r, segments, "", parent) {
+	if !h.checkIf(w, r, segments, "", fsPath(segments[:len(segments)-1])) {
 		return
 	}
-	if _, _, err := h.server.Mkdir(r.Context(), request, parent, name, facetfs.SetAttr{}); err != nil {
-		h.writeError(w, err)
+	if err := h.FileSystem.Mkdir(r.Context(), fsPath(segments), 0o755); err != nil {
+		switch {
+		case errors.Is(err, fs.ErrExist):
+			// RFC 4918 §9.3.1: MKCOL on a mapped URL is 405.
+			h.methodNotAllowed(w)
+		case errors.Is(err, fs.ErrNotExist):
+			// A missing intermediate collection is 409.
+			http.Error(w, http.StatusText(http.StatusConflict), http.StatusConflict)
+		default:
+			h.writeError(w, r, err)
+		}
 		return
 	}
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (h *Handler) remove(w http.ResponseWriter, r *http.Request, request facetfs.Request, segments []string) {
-	parent, name, err := h.parent(r.Context(), request, segments)
-	if err != nil {
-		h.writeError(w, err)
+func (h *Handler) remove(w http.ResponseWriter, r *http.Request, segments []string) {
+	if len(segments) == 0 {
+		h.writeError(w, r, fs.ErrInvalid)
 		return
 	}
-	object, attr, err := h.server.Lookup(r.Context(), request, parent, name)
+	p := fsPath(segments)
+	fi, err := h.FileSystem.Stat(r.Context(), p)
 	if err != nil {
-		h.writeError(w, err)
+		h.writeError(w, r, err)
 		return
 	}
 	// Removing a member is governed by a lock on the member or on its collection.
-	if !h.checkIf(w, r, segments, entityTag(object, attr), object, parent) {
+	if !h.checkIf(w, r, segments, entityTag(fi), p, fsPath(segments[:len(segments)-1])) {
 		return
 	}
-	if err := h.removeObject(r, request, parent, name, object, attr); err != nil {
-		h.writeError(w, err)
+	if err := h.FileSystem.RemoveAll(r.Context(), p); err != nil {
+		h.writeError(w, r, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func entityTag(object facetfs.ObjectRef, attr facetfs.Attr) string {
-	value := fmt.Sprintf("%s\x00%d\x00%s\x00%d", object.NodeID, object.Generation, attr.ChangeToken, attr.Size)
-	return fmt.Sprintf("\"%x\"", sha256.Sum256([]byte(value)))
+// entityTag derives an entity tag from the file's modification time and size,
+// like x/net/webdav. A FileSystem whose ModTime is too coarse for this to be
+// strong should serve GET behind its own validator.
+func entityTag(fi fs.FileInfo) string {
+	return fmt.Sprintf("\"%x%x\"", fi.ModTime().UnixNano(), fi.Size())
 }
 
-// checkIf evaluates the WebDAV If header against the resource named by segments.
-// A state token is satisfied by a lock held on any of objects, so a client
-// mutating a member of a locked collection submits the collection's token (RFC
-// 4918 §7.4) — the same token the coordinator requires to admit the mutation.
-// Callers pass only objects that exist. It returns false and writes 412 when the
-// header is present and applies to this resource but its preconditions fail.
-func (h *Handler) checkIf(w http.ResponseWriter, r *http.Request, segments []string, etag string, objects ...facetfs.ObjectRef) bool {
-	if r.Header.Get("If") == "" {
-		return true
-	}
-	var held []string
-	for _, object := range objects {
-		if lock, ok := h.server.LockOf(object); ok {
-			held = append(held, lock.Token)
+// checkIf enforces the WebDAV locking preconditions for a mutation of the
+// resource named by segments. It first evaluates the If header (RFC 4918
+// §10.4), writing 412 when the header applies and fails, and then guards every
+// governed path against live locks the request did not satisfy with a token,
+// writing 423. A state token is satisfied by a lock held on any governed path,
+// so a client mutating a member of a locked collection submits the
+// collection's token (RFC 4918 §7.4). It returns false when the mutation must
+// not proceed.
+func (h *Handler) checkIf(w http.ResponseWriter, r *http.Request, segments []string, etag string, governed ...string) bool {
+	header := r.Header.Get("If")
+	tokens := ifTokens(header)
+	now := h.now()
+	if header != "" {
+		var held []string
+		if h.LockSystem != nil {
+			for _, root := range governed {
+				if lock, ok := h.LockSystem.Holder(now, root); ok {
+					held = append(held, lock.Token)
+				}
+			}
+		}
+		// Untagged lists name the request-URI, so whether this resource is the one
+		// the request names decides if they apply to it.
+		requestSegments, err := h.segments(r.URL)
+		target := ifTarget{
+			segments:   segments,
+			requestURI: err == nil && slices.Equal(requestSegments, segments),
+			etag:       etag,
+			tokens:     held,
+		}
+		if !evaluateIf(header, target, h.tagResolver(r)) {
+			w.WriteHeader(http.StatusPreconditionFailed)
+			return false
 		}
 	}
-	// Untagged lists name the request-URI, so whether this resource is the one the
-	// request names decides if they apply to it.
-	requestSegments, err := h.segments(r.URL)
-	target := ifTarget{
-		segments:   segments,
-		requestURI: err == nil && slices.Equal(requestSegments, segments),
-		etag:       etag,
-		tokens:     held,
-	}
-	if !evaluateIf(r.Header.Get("If"), target, h.tagResolver(r)) {
-		w.WriteHeader(http.StatusPreconditionFailed)
-		return false
+	if h.LockSystem != nil {
+		for _, root := range governed {
+			if _, locked := h.LockSystem.Guard(now, root, tokens); locked {
+				http.Error(w, http.StatusText(http.StatusLocked), http.StatusLocked)
+				return false
+			}
+		}
 	}
 	return true
 }
 
-// destinationTag returns the entity tag a COPY or MOVE destination presents to
-// an If header, which is empty when nothing is there to overwrite.
-func destinationTag(exists bool, object facetfs.ObjectRef, attr facetfs.Attr) string {
-	if !exists {
-		return ""
-	}
-	return entityTag(object, attr)
-}
-
-// destinationLocks returns the objects whose locks govern writing a COPY or MOVE
-// destination: the collection it is written into, and the object it replaces.
-func destinationLocks(exists bool, object, parent facetfs.ObjectRef) []facetfs.ObjectRef {
-	if !exists {
-		return []facetfs.ObjectRef{parent}
-	}
-	return []facetfs.ObjectRef{parent, object}
-}
-
-// tagResolver maps an If header resource tag to export-relative path segments so
-// that a tagged list can be matched against the resource it names. A tag naming
-// another host, or a path outside this export, resolves to nothing and so
-// applies to no resource served here.
+// tagResolver maps an If header resource tag to path segments so that a tagged
+// list can be matched against the resource it names. A tag naming another
+// host, or a path outside this prefix, resolves to nothing and so applies to
+// no resource served here.
 func (h *Handler) tagResolver(r *http.Request) func(string) ([]string, bool) {
 	return func(tag string) ([]string, bool) {
 		parsed, err := url.Parse(tag)
@@ -295,24 +219,6 @@ func (h *Handler) tagResolver(r *http.Request) func(string) ([]string, bool) {
 		}
 		return segments, true
 	}
-}
-
-func readConditions(w http.ResponseWriter, r *http.Request, etag string, modified time.Time) bool {
-	if value := r.Header.Get("If-Match"); value != "" && !strongETagMatches(value, etag) {
-		w.WriteHeader(http.StatusPreconditionFailed)
-		return false
-	}
-	if value := r.Header.Get("If-None-Match"); value != "" && weakETagMatches(value, etag) {
-		w.WriteHeader(http.StatusNotModified)
-		return false
-	}
-	if value := r.Header.Get("If-Modified-Since"); value != "" && r.Header.Get("If-None-Match") == "" {
-		if since, err := http.ParseTime(value); err == nil && !modified.Truncate(time.Second).After(since) {
-			w.WriteHeader(http.StatusNotModified)
-			return false
-		}
-	}
-	return true
 }
 
 func writeConditions(w http.ResponseWriter, r *http.Request, exists bool, etag string) bool {
@@ -349,53 +255,4 @@ func weakETagMatches(header, etag string) bool {
 		}
 	}
 	return false
-}
-
-func ifRangeMatches(value, etag string, modified time.Time) bool {
-	if value == "" {
-		return true
-	}
-	if strings.HasPrefix(value, "\"") {
-		return value == etag
-	}
-	date, err := http.ParseTime(value)
-	return err == nil && !modified.Truncate(time.Second).After(date)
-}
-
-func byteRange(header string, size int64) (int64, int64, bool, error) {
-	if header == "" {
-		return 0, size, false, nil
-	}
-	if !strings.HasPrefix(header, "bytes=") || strings.Contains(header, ",") || size == 0 {
-		return 0, 0, false, facetfs.ErrInvalid
-	}
-	parts := strings.SplitN(strings.TrimPrefix(header, "bytes="), "-", 2)
-	if len(parts) != 2 {
-		return 0, 0, false, facetfs.ErrInvalid
-	}
-	if parts[0] == "" {
-		suffix, err := strconv.ParseInt(parts[1], 10, 64)
-		if err != nil || suffix <= 0 {
-			return 0, 0, false, facetfs.ErrInvalid
-		}
-		if suffix > size {
-			suffix = size
-		}
-		return size - suffix, suffix, true, nil
-	}
-	start, err := strconv.ParseInt(parts[0], 10, 64)
-	if err != nil || start < 0 || start >= size {
-		return 0, 0, false, facetfs.ErrInvalid
-	}
-	end := size - 1
-	if parts[1] != "" {
-		end, err = strconv.ParseInt(parts[1], 10, 64)
-		if err != nil || end < start {
-			return 0, 0, false, facetfs.ErrInvalid
-		}
-		if end >= size {
-			end = size - 1
-		}
-	}
-	return start, end - start + 1, true, nil
 }

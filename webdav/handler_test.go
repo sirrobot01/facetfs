@@ -1,20 +1,19 @@
 package webdav_test
 
 import (
-	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sirrobot01/facetfs"
-	"github.com/sirrobot01/facetfs/backend/memfs"
 	"github.com/sirrobot01/facetfs/webdav"
 )
 
 func TestFileWorkflow(t *testing.T) {
-	handler := newHandler(t, webdav.Options{ExportID: "data", Prefix: "/dav"})
+	handler := newHandler()
 
 	response := serve(handler, http.MethodOptions, "/dav", nil, nil)
 	if response.Code != http.StatusNoContent || response.Header().Get("DAV") != "1, 2" {
@@ -63,7 +62,7 @@ func TestFileWorkflow(t *testing.T) {
 }
 
 func TestCollectionWorkflow(t *testing.T) {
-	handler := newHandler(t, webdav.Options{ExportID: "data", Prefix: "/dav"})
+	handler := newHandler()
 	if response := serve(handler, "MKCOL", "/dav/dir", nil, nil); response.Code != http.StatusCreated {
 		t.Fatalf("MKCOL = %d: %s", response.Code, response.Body.String())
 	}
@@ -102,7 +101,7 @@ const exclusiveWriteLock = `<?xml version="1.0" encoding="utf-8"?>` +
 	`<locktype><write/></locktype><owner>tester</owner></lockinfo>`
 
 func TestLockWorkflow(t *testing.T) {
-	handler := newHandler(t, webdav.Options{ExportID: "data", Prefix: "/dav"})
+	handler := newHandler()
 	if response := serve(handler, http.MethodPut, "/dav/file", strings.NewReader("hello"), nil); response.Code != http.StatusCreated {
 		t.Fatalf("PUT = %d: %s", response.Code, response.Body.String())
 	}
@@ -141,7 +140,7 @@ func TestLockWorkflow(t *testing.T) {
 }
 
 func TestLockCreatesEmptyResource(t *testing.T) {
-	handler := newHandler(t, webdav.Options{ExportID: "data", Prefix: "/dav"})
+	handler := newHandler()
 	response := serve(handler, "LOCK", "/dav/pending", strings.NewReader(exclusiveWriteLock), nil)
 	if response.Code != http.StatusCreated {
 		t.Fatalf("LOCK create = %d: %s", response.Code, response.Body.String())
@@ -156,10 +155,10 @@ func TestLockCreatesEmptyResource(t *testing.T) {
 	}
 }
 
-// Only Depth 0 locks are granted, because the coordinator enforces a lock on a
-// single object. A lock must never report a depth it does not enforce.
+// Only Depth 0 locks are granted, because the lock system enforces a lock on a
+// single path. A lock must never report a depth it does not enforce.
 func TestLockDepth(t *testing.T) {
-	handler := newHandler(t, webdav.Options{ExportID: "data", Prefix: "/dav"})
+	handler := newHandler()
 	if response := serve(handler, "MKCOL", "/dav/coll", nil, nil); response.Code != http.StatusCreated {
 		t.Fatalf("MKCOL = %d: %s", response.Code, response.Body.String())
 	}
@@ -194,21 +193,27 @@ func TestLockDepth(t *testing.T) {
 	}
 }
 
+// refusingLS refuses every lock creation so the placeholder-cleanup path can
+// be exercised.
+type refusingLS struct{ webdav.LockSystem }
+
+func (refusingLS) Create(time.Time, webdav.LockDetails) (webdav.LockDetails, error) {
+	return webdav.LockDetails{}, webdav.ErrTooManyLocks
+}
+
 // LOCK on an unmapped URL creates an empty resource to carry the lock. If the
 // lock is then refused, that placeholder must not survive: the client received
 // an error and never asked for the resource.
 func TestLockLeavesNoResourceWhenRefused(t *testing.T) {
-	handler := newHandlerAuth(t, webdav.Options{ExportID: "data", Prefix: "/dav"},
-		func(_ context.Context, _ facetfs.Request, check facetfs.AccessCheck) error {
-			if check.Action == facetfs.ActionLock {
-				return facetfs.ErrAccessDenied
-			}
-			return nil
-		})
+	handler := &webdav.Handler{
+		Prefix:     "/dav",
+		FileSystem: facetfs.NewMemFS(),
+		LockSystem: refusingLS{webdav.NewMemLS()},
+	}
 
 	response := serve(handler, "LOCK", "/dav/pending", strings.NewReader(exclusiveWriteLock), nil)
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("refused LOCK = %d, want 403: %s", response.Code, response.Body.String())
+	if response.Code != http.StatusLocked {
+		t.Fatalf("refused LOCK = %d, want 423: %s", response.Code, response.Body.String())
 	}
 	if response := serve(handler, http.MethodGet, "/dav/pending", nil, nil); response.Code != http.StatusNotFound {
 		t.Fatalf("GET after refused LOCK = %d, want 404: the placeholder was orphaned", response.Code)
@@ -217,7 +222,7 @@ func TestLockLeavesNoResourceWhenRefused(t *testing.T) {
 
 // A tagged list is evaluated against the resource it names rather than ignored.
 func TestIfHeaderTaggedList(t *testing.T) {
-	handler := newHandler(t, webdav.Options{ExportID: "data", Prefix: "/dav"})
+	handler := newHandler()
 	if response := serve(handler, http.MethodPut, "/dav/file", strings.NewReader("v1"), nil); response.Code != http.StatusCreated {
 		t.Fatalf("PUT = %d: %s", response.Code, response.Body.String())
 	}
@@ -245,7 +250,7 @@ func TestIfHeaderTaggedList(t *testing.T) {
 // MKCOL, MOVE and COPY are governed by the locks on what they write, and submit
 // their tokens through the If header like any other mutation.
 func TestLockGovernsMkcolMoveAndCopy(t *testing.T) {
-	handler := newHandler(t, webdav.Options{ExportID: "data", Prefix: "/dav"})
+	handler := newHandler()
 	if response := serve(handler, "MKCOL", "/dav/box", nil, nil); response.Code != http.StatusCreated {
 		t.Fatalf("MKCOL = %d: %s", response.Code, response.Body.String())
 	}
@@ -293,67 +298,44 @@ func TestLockGovernsMkcolMoveAndCopy(t *testing.T) {
 }
 
 func TestLimitsAndTraversal(t *testing.T) {
-	handler := newHandler(t, webdav.Options{ExportID: "data", Prefix: "/dav", MaxBodyBytes: 4})
+	handler := &webdav.Handler{
+		Prefix:       "/dav",
+		FileSystem:   facetfs.NewMemFS(),
+		LockSystem:   webdav.NewMemLS(),
+		MaxBodyBytes: 4,
+	}
 	if response := serve(handler, http.MethodPut, "/dav/file", strings.NewReader("12345"), nil); response.Code != http.StatusRequestEntityTooLarge {
 		t.Fatalf("oversized PUT = %d: %s", response.Code, response.Body.String())
 	}
 	if response := serve(handler, http.MethodGet, "/dav/a%2Fb", nil, nil); response.Code != http.StatusBadRequest {
 		t.Fatalf("encoded separator = %d", response.Code)
 	}
-	if response := serve(handler, http.MethodGet, "/dav/e%CC%81", nil, nil); response.Code != http.StatusBadRequest {
-		t.Fatalf("non-normalized path = %d", response.Code)
-	}
 	if response := serve(handler, http.MethodGet, "/other/file", nil, nil); response.Code != http.StatusNotFound {
 		t.Fatalf("outside prefix = %d", response.Code)
 	}
 }
 
-func TestAuthenticationFailure(t *testing.T) {
-	server, err := facetfs.New(t.Context(), facetfs.Config{Exports: []facetfs.Export{{ID: "data", Name: "Data", Backend: memfs.New()}}})
-	if err != nil {
-		t.Fatal(err)
+// A Handler without a LockSystem serves class 1 only.
+func TestNilLockSystem(t *testing.T) {
+	handler := &webdav.Handler{Prefix: "/dav", FileSystem: facetfs.NewMemFS()}
+	response := serve(handler, http.MethodOptions, "/dav", nil, nil)
+	if response.Code != http.StatusNoContent || response.Header().Get("DAV") != "1" {
+		t.Fatalf("OPTIONS = %d, DAV %q", response.Code, response.Header().Get("DAV"))
 	}
-	handler, err := webdav.New(server, webdav.Options{ExportID: "data"})
-	if err != nil {
-		t.Fatal(err)
+	if response := serve(handler, "LOCK", "/dav/file", strings.NewReader(exclusiveWriteLock), nil); response.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("LOCK without LockSystem = %d, want 405", response.Code)
 	}
-	if response := serve(handler, http.MethodGet, "/file", nil, nil); response.Code != http.StatusUnauthorized {
-		t.Fatalf("anonymous GET = %d", response.Code)
-	}
-}
-
-func TestPlaintextBasicAuthenticationIsRejected(t *testing.T) {
-	handler := newHandler(t, webdav.Options{
-		ExportID: "data",
-		Authenticate: func(context.Context, *http.Request) (facetfs.Principal, error) {
-			return facetfs.Principal{Subject: "user"}, nil
-		},
-	})
-	response := serve(handler, http.MethodGet, "/file", nil, map[string]string{"Authorization": "Basic dXNlcjpwYXNz"})
-	if response.Code != http.StatusForbidden {
-		t.Fatalf("plaintext Basic GET = %d", response.Code)
+	if response := serve(handler, http.MethodPut, "/dav/file", strings.NewReader("data"), nil); response.Code != http.StatusCreated {
+		t.Fatalf("PUT = %d: %s", response.Code, response.Body.String())
 	}
 }
 
-func newHandler(t *testing.T, options webdav.Options) http.Handler {
-	t.Helper()
-	return newHandlerAuth(t, options, func(context.Context, facetfs.Request, facetfs.AccessCheck) error { return nil })
-}
-
-func newHandlerAuth(t *testing.T, options webdav.Options, authorize facetfs.AuthorizerFunc) http.Handler {
-	t.Helper()
-	server, err := facetfs.New(t.Context(), facetfs.Config{
-		Authorizer: authorize,
-		Exports:    []facetfs.Export{{ID: "data", Name: "Data", Backend: memfs.New()}},
-	})
-	if err != nil {
-		t.Fatal(err)
+func newHandler() http.Handler {
+	return &webdav.Handler{
+		Prefix:     "/dav",
+		FileSystem: facetfs.NewMemFS(),
+		LockSystem: webdav.NewMemLS(),
 	}
-	handler, err := webdav.New(server, options)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return handler
 }
 
 func serve(handler http.Handler, method, target string, body io.Reader, headers map[string]string) *httptest.ResponseRecorder {
