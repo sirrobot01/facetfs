@@ -16,6 +16,7 @@ import (
 type testClient struct {
 	t    *testing.T
 	c    net.Conn
+	s    *Server
 	xid  uint32
 	deep int
 }
@@ -33,7 +34,7 @@ func newTestClient(t *testing.T, fsys facetfs.FileSystem) *testClient {
 		<-done
 	})
 	client.SetDeadline(time.Now().Add(10 * time.Second))
-	return &testClient{t: t, c: client}
+	return &testClient{t: t, c: client, s: s}
 }
 
 // compound sends the ops and returns the overall status and a decoder

@@ -41,6 +41,8 @@ type client struct {
 	verifier    [8]byte // client's boot verifier from SETCLIENTID
 	confirmVerf [8]byte // server-issued setclientid_confirm
 	principal   string
+	cb          callbackPath
+	cbUp        bool // the callback path answered CB_NULL; guarded by st.mu
 	lastRenew   time.Time
 	openOwners  map[string]*owner
 	lockOwners  map[string]*owner
@@ -123,7 +125,7 @@ func principalOf(cred *authSysCred) string {
 // unconfirmed client and returns the id and confirmation verifier the client
 // must echo. A confirmed record for the same owner under another principal is
 // protected by NFS4ERR_CLID_INUSE.
-func (st *stateStore) setClientID(ownerID string, verifier [8]byte, principal string) (uint64, [8]byte, nfsStat) {
+func (st *stateStore) setClientID(ownerID string, verifier [8]byte, principal string, cb callbackPath) (uint64, [8]byte, nfsStat) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	if held, ok := st.byOwner[ownerID]; ok && held.principal != principal {
@@ -141,6 +143,7 @@ func (st *stateStore) setClientID(ownerID string, verifier [8]byte, principal st
 		ownerID:    ownerID,
 		verifier:   verifier,
 		principal:  principal,
+		cb:         cb,
 		lastRenew:  st.now(),
 		openOwners: map[string]*owner{},
 		lockOwners: map[string]*owner{},
@@ -154,7 +157,11 @@ func (st *stateStore) setClientID(ownerID string, verifier [8]byte, principal st
 // previously confirmed record for the same owner — the client rebooted — and
 // releases that record's state. Re-confirming an already confirmed pair is
 // idempotent because clients retry over connection loss.
-func (st *stateStore) confirmClientID(id uint64, confirmVerf [8]byte) nfsStat {
+//
+// A fresh confirmation returns the client so the caller can probe its
+// callback path outside the store mutex. A repeat returns nil: the probe
+// already ran.
+func (st *stateStore) confirmClientID(id uint64, confirmVerf [8]byte) (*client, nfsStat) {
 	st.mu.Lock()
 	if c, ok := st.unconfirmed[id]; ok && c.confirmVerf == confirmVerf {
 		delete(st.unconfirmed, id)
@@ -170,15 +177,15 @@ func (st *stateStore) confirmClientID(id uint64, confirmVerf [8]byte) nfsStat {
 		for _, f := range files {
 			f.Close()
 		}
-		return nfs4OK
+		return c, nfs4OK
 	}
 	if c, ok := st.confirmed[id]; ok && c.confirmVerf == confirmVerf {
 		c.lastRenew = st.now()
 		st.mu.Unlock()
-		return nfs4OK
+		return nil, nfs4OK
 	}
 	st.mu.Unlock()
-	return nfs4ErrStaleClientID
+	return nil, nfs4ErrStaleClientID
 }
 
 func (st *stateStore) renew(id uint64) nfsStat {

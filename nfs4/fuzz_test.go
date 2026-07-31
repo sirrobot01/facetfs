@@ -93,6 +93,24 @@ func FuzzServeConn(f *testing.F) {
 	})
 }
 
+// FuzzParseUniversalAddr asserts the callback address parser never panics
+// and that whatever it accepts really dials apart into a host and a port.
+func FuzzParseUniversalAddr(f *testing.F) {
+	f.Add("tcp", "10.0.0.1.8.1")
+	f.Add("tcp6", "fe80::1.8.1")
+	f.Add("tcp", "0.0.0.0.0.0")
+	f.Add("tcp", "10.0.0.1.+8.001")
+	f.Fuzz(func(t *testing.T, netid, uaddr string) {
+		addr, err := parseUniversalAddr(netid, uaddr)
+		if err != nil {
+			return
+		}
+		if _, _, err := net.SplitHostPort(addr); err != nil {
+			t.Fatalf("parseUniversalAddr(%q, %q) = %q: %v", netid, uaddr, addr, err)
+		}
+	})
+}
+
 // compoundRecord frames a COMPOUND call as one RPC record body.
 func compoundRecord(xid uint32, args []byte) []byte {
 	var e xdr.Encoder

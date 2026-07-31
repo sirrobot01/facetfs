@@ -544,16 +544,17 @@ func (c *compound) setClientID(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	var verifier [8]byte
 	copy(verifier[:], d.OpaqueFixed(8))
 	ownerID := d.Opaque(maxClientOwnerID)
-	// Callback information is decoded for framing and discarded: delegations
-	// are never granted, so no callback path is ever established.
-	d.Uint32()   // cb_program
-	d.String(16) // r_netid
-	d.String(64) // r_addr
-	d.Uint32()   // callback_ident
+	cb := callbackPath{program: d.Uint32()}
+	netid := d.String(16)
+	uaddr := d.String(64)
+	cb.ident = d.Uint32()
 	if d.Err() != nil {
 		return status(e, nfs4ErrBadXDR)
 	}
-	id, confirmVerf, st := c.s.state.setClientID(string(ownerID), verifier, principalOf(c.cred))
+	// An unusable callback address is not an error (RFC 7530 §16.33.5): the
+	// client is registered and simply never receives a delegation.
+	cb.addr, _ = parseUniversalAddr(netid, uaddr)
+	id, confirmVerf, st := c.s.state.setClientID(string(ownerID), verifier, principalOf(c.cred), cb)
 	if st != nfs4OK {
 		e.Uint32(uint32(st))
 		// NFS4ERR_CLID_INUSE carries the holder's address; none is tracked.
@@ -574,7 +575,11 @@ func (c *compound) setClientIDConfirm(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	if d.Err() != nil {
 		return status(e, nfs4ErrBadXDR)
 	}
-	return status(e, c.s.state.confirmClientID(id, confirmVerf))
+	confirmed, st := c.s.state.confirmClientID(id, confirmVerf)
+	if confirmed != nil && confirmed.cb.addr != "" {
+		go c.s.probeCallback(confirmed)
+	}
+	return status(e, st)
 }
 
 func (c *compound) renew(d *xdr.Decoder, e *xdr.Encoder) nfsStat {

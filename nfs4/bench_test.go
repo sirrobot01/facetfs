@@ -300,8 +300,8 @@ func BenchmarkReaddirScale4000(b *testing.B) { benchReaddir(b, 4000, 8<<10) }
 func benchSweep(b *testing.B, clients int, gated bool) {
 	store := newStateStore(90 * time.Second)
 	for i := range clients {
-		id, confirm, st := store.setClientID(fmt.Sprintf("sweep-%d", i), [8]byte{}, "none")
-		if st != nfs4OK || store.confirmClientID(id, confirm) != nfs4OK {
+		id, confirm, st := store.setClientID(fmt.Sprintf("sweep-%d", i), [8]byte{}, "none", callbackPath{})
+		if _, cst := store.confirmClientID(id, confirm); st != nfs4OK || cst != nfs4OK {
 			b.Fatal("could not register client")
 		}
 	}

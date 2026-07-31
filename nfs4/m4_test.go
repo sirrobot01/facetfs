@@ -390,8 +390,8 @@ func TestLeaseSweepAndExpiredTombstones(t *testing.T) {
 	now := time.Unix(100, 0)
 	store := newStateStore(10 * time.Second)
 	store.now = func() time.Time { return now }
-	id, confirm, st := store.setClientID("lease-client", [8]byte{}, "none")
-	if st != nfs4OK || store.confirmClientID(id, confirm) != nfs4OK {
+	id, confirm, st := store.setClientID("lease-client", [8]byte{}, "none", callbackPath{})
+	if _, cst := store.confirmClientID(id, confirm); st != nfs4OK || cst != nfs4OK {
 		t.Fatal("could not establish test client")
 	}
 	owner, st := store.ownerOf(id, "open-owner")
