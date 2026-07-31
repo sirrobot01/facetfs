@@ -1,4 +1,4 @@
-.PHONY: all build check fmt test race vet bench fuzz clean
+.PHONY: all build check fmt test race vet bench bench-protocols fuzz clean
 
 FUZZTIME ?= 5m
 
@@ -22,7 +22,11 @@ race:
 	go test -race ./...
 
 bench:
-	go test ./internal/xdr ./nfs4 -run '^$$' -bench . -benchmem
+	go test ./internal/xdr ./nfs4 ./smb -run '^$$' -bench . -benchmem
+
+# Compare warm, end-to-end protocol operations over loopback and MemFS.
+bench-protocols:
+	go test ./nfs4 -run '^$$' -bench '^BenchmarkProtocolComparison$$' -benchmem
 
 # Longer campaigns than CI runs. Set FUZZTIME to change the budget per target.
 fuzz:
@@ -30,6 +34,10 @@ fuzz:
 	go test ./nfs4 -run '^$$' -fuzz FuzzServeConn -fuzztime $(FUZZTIME)
 	go test ./nfs4 -run '^$$' -fuzz FuzzParseUniversalAddr -fuzztime $(FUZZTIME)
 	go test ./nfs4 -run '^$$' -fuzz FuzzCallbackReply -fuzztime $(FUZZTIME)
+	go test ./smb -run '^$$' -fuzz FuzzHandleFrame -fuzztime $(FUZZTIME)
+	go test ./smb -run '^$$' -fuzz FuzzReadFrame -fuzztime $(FUZZTIME)
+	go test ./smb -run '^$$' -fuzz FuzzNegotiate -fuzztime $(FUZZTIME)
+	go test ./smb -run '^$$' -fuzz FuzzNTLMAndPaths -fuzztime $(FUZZTIME)
 
 clean:
 	rm -f coverage.out coverage.html
