@@ -185,11 +185,14 @@ func (s *Server) handleRecord(ctx context.Context, record []byte) (reply []byte,
 	case procNull:
 		return accepted(xid, acceptSuccess, nil), true
 	case procCompound:
-		result, ok := s.compound(ctx, cred, d)
-		if !ok {
+		// The compound encodes into the reply buffer directly. Assembling it
+		// separately would copy every READ payload twice more.
+		var e xdr.Encoder
+		acceptedHeader(&e, xid, acceptSuccess)
+		if !s.compound(ctx, cred, d, &e) {
 			return accepted(xid, acceptGarbageArgs, nil), true
 		}
-		return accepted(xid, acceptSuccess, result), true
+		return e.Bytes(), true
 	default:
 		return accepted(xid, acceptProcUnavail, nil), true
 	}
@@ -214,14 +217,18 @@ func parseAuthSys(body []byte) (*authSysCred, error) {
 	return cred, nil
 }
 
-func accepted(xid uint32, stat uint32, body []byte) []byte {
-	var e xdr.Encoder
+func acceptedHeader(e *xdr.Encoder, xid uint32, stat uint32) {
 	e.Uint32(xid)
 	e.Uint32(msgReply)
 	e.Uint32(replyAccepted)
 	e.Uint32(authNone)
 	e.Uint32(0)
 	e.Uint32(stat)
+}
+
+func accepted(xid uint32, stat uint32, body []byte) []byte {
+	var e xdr.Encoder
+	acceptedHeader(&e, xid, stat)
 	e.OpaqueFixed(body)
 	return e.Bytes()
 }

@@ -75,22 +75,33 @@ func (c *compound) read(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	if temporary {
 		defer f.Close()
 	}
-	buf := make([]byte, count)
-	n, err := f.ReadAt(buf, int64(offset))
-	if n < 0 || n > len(buf) {
+	// The data is read straight into the reply buffer: staging it elsewhere
+	// would copy every byte again on the way out.
+	mark := e.Len()
+	e.Uint32(uint32(nfs4OK))
+	eofAt := e.Len()
+	e.Bool(false)
+	lengthAt := e.Len()
+	e.Uint32(0)
+	n, err := f.ReadAt(e.Reserve(count), int64(offset))
+	if n < 0 || n > int(count) {
+		e.Truncate(mark)
 		return status(e, nfs4ErrServerFault)
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
+		e.Truncate(mark)
 		return status(e, fhErr(err))
 	}
 	fi, statErr := f.Stat()
 	if statErr != nil {
+		e.Truncate(mark)
 		return status(e, fhErr(statErr))
 	}
-	eof := offset+uint64(n) >= uint64(max(fi.Size(), 0))
-	e.Uint32(uint32(nfs4OK))
-	e.Bool(eof)
-	e.Opaque(buf[:n])
+	if offset+uint64(n) >= uint64(max(fi.Size(), 0)) {
+		e.PatchUint32(eofAt, 1)
+	}
+	e.PatchUint32(lengthAt, uint32(n))
+	e.Truncate(lengthAt + 4 + n + int(xdr.Padding(uint32(n))))
 	return nfs4OK
 }
 

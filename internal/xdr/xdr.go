@@ -132,6 +132,25 @@ func (e *Encoder) Truncate(n int) {
 	e.b = e.b[:n]
 }
 
+// PatchUint32 overwrites the value at offset n, which the caller reserved
+// with a placeholder before it knew what to put there.
+func (e *Encoder) PatchUint32(n int, v uint32) {
+	binary.BigEndian.PutUint32(e.b[n:], v)
+}
+
+// Reserve appends n zeroed bytes plus padding and returns the n-byte region
+// for the caller to fill in place, which lets a large value be produced
+// straight into the buffer instead of being copied into it. The returned
+// slice is only valid until the next call that appends to the Encoder.
+func (e *Encoder) Reserve(n uint32) []byte {
+	start := len(e.b)
+	e.b = append(e.b, make([]byte, int(n)+int(pad(n)))...)
+	return e.b[start : start+int(n)]
+}
+
+// Padding reports the bytes of padding that follow a value of n bytes.
+func Padding(n uint32) uint32 { return pad(n) }
+
 func (e *Encoder) Uint32(v uint32) {
 	e.b = binary.BigEndian.AppendUint32(e.b, v)
 }

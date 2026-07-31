@@ -62,18 +62,27 @@ var opTable = [40]opFunc{
 	opReleaseLockOwner:   (*compound).releaseLockOwner,
 }
 
-// compound executes one COMPOUND call (RFC 7530 §15.2). ok=false means the
-// top-level arguments did not decode: the RPC layer answers GARBAGE_ARGS.
-func (s *Server) compound(ctx context.Context, cred *authSysCred, d *xdr.Decoder) ([]byte, bool) {
+// compound executes one COMPOUND call (RFC 7530 §15.2) and appends the reply
+// to e. It reports false when the top-level arguments did not decode, which
+// the RPC layer answers with GARBAGE_ARGS.
+func (s *Server) compound(ctx context.Context, cred *authSysCred, d *xdr.Decoder, e *xdr.Encoder) bool {
 	s.state.sweepExpired()
 	tag := d.Opaque(maxTagBytes)
 	minor := d.Uint32()
 	numOps := d.Uint32()
 	if d.Err() != nil {
-		return nil, false
+		return false
 	}
 
-	var results xdr.Encoder
+	// The status and the operation count are only known once every operation
+	// has run, so they are reserved now and filled in at the end.
+	statusAt := e.Len()
+	e.Uint32(0)
+	e.Opaque(tag)
+	countAt := e.Len()
+	e.Uint32(0)
+	resultsFrom := e.Len()
+
 	status := nfs4OK
 	count := uint32(0)
 
@@ -90,30 +99,30 @@ func (s *Server) compound(ctx context.Context, cred *authSysCred, d *xdr.Decoder
 				// Garbled mid-stream: answer with the ops already run.
 				break
 			}
-			mark := results.Len()
+			mark := e.Len()
 			var op opFunc
 			if opnum >= opAccess && opnum < uint32(len(opTable)) {
 				op = opTable[opnum]
 			}
 			if op == nil {
 				if opnum >= opAccess && opnum < uint32(len(opTable)) {
-					results.Uint32(opnum)
-					results.Uint32(uint32(nfs4ErrNotSupp))
+					e.Uint32(opnum)
+					e.Uint32(uint32(nfs4ErrNotSupp))
 					status = nfs4ErrNotSupp
 				} else {
-					results.Uint32(opIllegal)
-					results.Uint32(uint32(nfs4ErrOpIllegal))
+					e.Uint32(opIllegal)
+					e.Uint32(uint32(nfs4ErrOpIllegal))
 					status = nfs4ErrOpIllegal
 				}
 				count++
 				break
 			}
-			results.Uint32(opnum)
-			status = op(c, d, &results)
-			if results.Len() > s.responseCap() {
-				results.Truncate(mark)
-				results.Uint32(opnum)
-				results.Uint32(uint32(nfs4ErrResource))
+			e.Uint32(opnum)
+			status = op(c, d, e)
+			if e.Len()-resultsFrom > s.responseCap() {
+				e.Truncate(mark)
+				e.Uint32(opnum)
+				e.Uint32(uint32(nfs4ErrResource))
 				status = nfs4ErrResource
 			}
 			if status != nfs4OK {
@@ -123,10 +132,7 @@ func (s *Server) compound(ctx context.Context, cred *authSysCred, d *xdr.Decoder
 		}
 	}
 
-	var e xdr.Encoder
-	e.Uint32(uint32(status))
-	e.Opaque(tag)
-	e.Uint32(count)
-	e.OpaqueFixed(results.Bytes())
-	return e.Bytes(), true
+	e.PatchUint32(statusAt, uint32(status))
+	e.PatchUint32(countAt, count)
+	return true
 }
