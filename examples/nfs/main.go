@@ -30,6 +30,12 @@ func main() {
 	root := flag.String("root", ".", "directory to serve")
 	flag.Parse()
 
+	served, err := facetfs.OpenDir(*root)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer served.Close()
+
 	listener, err := net.Listen("tcp", *address)
 	if err != nil {
 		log.Fatal(err)
@@ -38,7 +44,7 @@ func main() {
 	defer stop()
 
 	server := &nfs4.Server{
-		FileSystem: facetfs.Dir(*root),
+		FileSystem: served,
 		Logger:     func(err error) { log.Printf("connection: %v", err) },
 	}
 	log.Printf("serving %s at %s", *root, listener.Addr())

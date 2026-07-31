@@ -35,11 +35,16 @@ type FileSystem interface {
 Return errors that satisfy `errors.Is` against the `io/fs` sentinels:
 `fs.ErrNotExist`, `fs.ErrExist`, `fs.ErrPermission`, and `fs.ErrInvalid`.
 
-Two implementations ship with the module:
+Three implementations ship with the module:
 
-- `facetfs.Dir("/srv/data")` serves a native directory tree. It uses `os.Root`,
-  so symbolic links cannot escape the tree.
+- `facetfs.OpenDir("/srv/data")` serves a native directory tree from a handle
+  it holds open. Use it in a server: holding the tree open makes a metadata
+  operation many times cheaper. Close it when you are done.
+- `facetfs.Dir("/srv/data")` serves the same tree without holding a handle,
+  which is convenient in a test but reopens the tree on every operation.
 - `facetfs.NewMemFS()` is an in-memory filesystem for tests and prototypes.
+
+Both reach the tree through `os.Root`, so symbolic links cannot escape it.
 
 Optional interfaces unlock protocol features:
 
@@ -64,9 +69,15 @@ only the requests that need it.
 your own authentication:
 
 ```go
+served, err := facetfs.OpenDir("/srv/data")
+if err != nil {
+    log.Fatal(err)
+}
+defer served.Close()
+
 handler := &webdav.Handler{
     Prefix:     "/dav",
-    FileSystem: facetfs.Dir("/srv/data"),
+    FileSystem: served,
     LockSystem: webdav.NewMemLS(), // omit for class 1 only
 }
 http.Handle("/dav/", yourAuthMiddleware(handler))
@@ -84,7 +95,7 @@ with `golang.org/x/crypto/ssh`. When a session channel requests the `sftp`
 subsystem, pass the channel to `Serve`:
 
 ```go
-server := &sftp.Server{FileSystem: facetfs.Dir("/srv/data")}
+server := &sftp.Server{FileSystem: served} // from facetfs.OpenDir
 
 // Inside your SSH session-channel loop:
 if err := server.Serve(ctx, channel); err != nil {
@@ -101,7 +112,7 @@ See [examples/sftp](./examples/sftp) for a complete program with host keys and
 mount it directly. No portmapper or mountd is needed.
 
 ```go
-server := &nfs4.Server{FileSystem: facetfs.Dir("/srv/data")}
+server := &nfs4.Server{FileSystem: served} // from facetfs.OpenDir
 listener, err := net.Listen("tcp", "127.0.0.1:20490")
 if err != nil {
     log.Fatal(err)

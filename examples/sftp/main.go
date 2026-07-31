@@ -54,7 +54,13 @@ func main() {
 	}
 	config.AddHostKey(hostKey)
 
-	server := &facetftp.Server{FileSystem: facetfs.Dir(*root)}
+	served, err := facetfs.OpenDir(*root)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer served.Close()
+
+	server := &facetftp.Server{FileSystem: served}
 
 	listener, err := net.Listen("tcp", *address)
 	if err != nil {

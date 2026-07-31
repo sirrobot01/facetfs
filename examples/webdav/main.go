@@ -38,9 +38,15 @@ func main() {
 		log.Fatal("-tls-cert and -tls-key must be provided together")
 	}
 
+	served, err := facetfs.OpenDir(*root)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer served.Close()
+
 	handler := &webdav.Handler{
 		Prefix:     "/dav",
-		FileSystem: facetfs.Dir(*root),
+		FileSystem: served,
 		LockSystem: webdav.NewMemLS(),
 		Logger: func(r *http.Request, err error) {
 			log.Printf("%s %s: %v", r.Method, r.URL.Path, err)

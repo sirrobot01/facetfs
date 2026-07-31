@@ -9,6 +9,17 @@ import (
 	"github.com/sirrobot01/facetfs/internal/xdr"
 )
 
+// openBenchDir serves a real directory through a held handle.
+func openBenchDir(b *testing.B, name string) facetfs.FileSystem {
+	b.Helper()
+	root, err := facetfs.OpenDir(name)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { root.Close() })
+	return root
+}
+
 // benchDirRead measures a READ against a real directory, so the numbers
 // include the Dir adapter and the operating system, not just the protocol.
 func benchDirRead(b *testing.B, size int) {
@@ -16,7 +27,7 @@ func benchDirRead(b *testing.B, size int) {
 	if err := os.WriteFile(filepath.Join(tmp, "data"), make([]byte, size), 0o644); err != nil {
 		b.Fatal(err)
 	}
-	bc := newBenchConn(b, facetfs.Dir(tmp))
+	bc := newBenchConn(b, openBenchDir(b, tmp))
 	record := benchRecord(func(e *xdr.Encoder) uint32 {
 		e.Uint32(opPutRootFH)
 		e.Uint32(opLookup)
@@ -40,7 +51,7 @@ func BenchmarkDirRead1M(b *testing.B)  { benchDirRead(b, 1<<20) }
 func BenchmarkDirGetattr(b *testing.B) {
 	tmp := b.TempDir()
 	os.WriteFile(filepath.Join(tmp, "data"), []byte("x"), 0o644)
-	bc := newBenchConn(b, facetfs.Dir(tmp))
+	bc := newBenchConn(b, openBenchDir(b, tmp))
 	var attrs bitmap
 	for _, n := range []int{attrType, attrSize, attrChange, attrFileID, attrMode, attrTimeModify} {
 		attrs.set(n)
