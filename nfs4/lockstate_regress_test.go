@@ -1,6 +1,7 @@
 package nfs4
 
 import (
+	"os"
 	"testing"
 
 	"github.com/sirrobot01/facetfs/internal/xdr"
@@ -46,7 +47,7 @@ func TestLockStateFollowsRename(t *testing.T) {
 	expectOp(t, d, opLookup, nfs4OK)
 
 	// A file created at the freed name must not inherit the lock.
-	f, err := fsys.OpenFile(t.Context(), "/hello.txt", 0x1|0x200, 0o644)
+	f, err := fsys.OpenFile(t.Context(), "/hello.txt", os.O_WRONLY|os.O_CREATE, 0o644)
 	if err != nil {
 		t.Fatal(err)
 	}

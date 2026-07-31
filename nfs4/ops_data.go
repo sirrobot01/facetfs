@@ -174,9 +174,10 @@ func (c *compound) commit(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	}
 	if len(opens) == 0 {
 		// The data was written without an open stateid, so nothing this
-		// server holds is buffered. A read-only handle still lets a native
-		// filesystem flush the file's own dirty pages.
-		f, err := c.s.FileSystem.OpenFile(c.ctx, c.fh, os.O_RDONLY, 0)
+		// server holds is buffered, but a native filesystem may still have
+		// the file's own pages dirty. The handle must be writable: Windows
+		// refuses FlushFileBuffers on a read-only one.
+		f, err := c.s.FileSystem.OpenFile(c.ctx, c.fh, os.O_WRONLY, 0)
 		if err != nil {
 			return status(e, fhErr(err))
 		}
