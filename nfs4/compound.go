@@ -30,6 +30,7 @@ var opTable = [40]opFunc{
 	opClose:              (*compound).close,
 	opCommit:             (*compound).commit,
 	opCreate:             (*compound).create,
+	opDelegReturn:        (*compound).delegReturn,
 	opGetAttr:            (*compound).getAttr,
 	opGetFH:              (*compound).getFH,
 	opLink:               (*compound).link,

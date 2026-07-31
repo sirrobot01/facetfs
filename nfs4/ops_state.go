@@ -35,6 +35,13 @@ const (
 	openResultConfirm = 2
 
 	openDelegateNone = 0
+	openDelegateRead = 1
+
+	// nfsace4 fields for the access a read delegation lets a client assume
+	// (RFC 7530 §16.18.5): everyone may read.
+	aceAllow          = 0
+	aceReadData       = 0x1
+	aceReadAttributes = 0x80
 )
 
 // noAdvance lists the statuses that leave an owner's sequence id untouched
@@ -348,6 +355,10 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 	}
 	other, stateSeq := held.other, held.seq
 	confirm := !owner.confirmed
+	var granted *delegation
+	if c.s.ReadDelegations {
+		granted = state.grantDelegationLocked(target, owner, unionAccess)
+	}
 	owner.client.lastRenew = state.now()
 	state.mu.Unlock()
 	if old != nil {
@@ -365,8 +376,30 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 		e.Uint32(0)
 	}
 	encodeBitmap(e, attrs.applied)
-	e.Uint32(openDelegateNone)
+	if granted != nil {
+		e.Uint32(openDelegateRead)
+		encodeStateid(e, granted.seq, granted.other)
+		e.Bool(false) // not being recalled
+		e.Uint32(aceAllow)
+		e.Uint32(0)
+		e.Uint32(aceReadData | aceReadAttributes)
+		e.String("EVERYONE@")
+	} else {
+		e.Uint32(openDelegateNone)
+	}
 	return nfs4OK
+}
+
+// delegReturn implements DELEGRETURN (RFC 7530 §16.7).
+func (c *compound) delegReturn(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
+	stateSeq, other := decodeStateid(d)
+	if d.Err() != nil {
+		return status(e, nfs4ErrBadXDR)
+	}
+	if !c.hasFH {
+		return status(e, nfs4ErrNoFilehandle)
+	}
+	return status(e, c.s.state.returnDelegation(stateSeq, other, c.fh))
 }
 
 func findOpenLocked(st *stateStore, p string, owner *owner) *openState {

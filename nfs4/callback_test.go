@@ -179,12 +179,12 @@ func TestPingCallback(t *testing.T) {
 
 // setClientIDCallback runs SETCLIENTID and SETCLIENTID_CONFIRM announcing the
 // given callback service.
-func setClientIDCallback(tc *testClient, program uint32, netid, uaddr string) uint64 {
+func setClientIDCallback(tc *testClient, name string, program uint32, netid, uaddr string) uint64 {
 	tc.t.Helper()
 	st, d := tc.compound(func(e *xdr.Encoder) uint32 {
 		e.Uint32(opSetClientID)
 		e.OpaqueFixed([]byte("verify01"))
-		e.Opaque([]byte("callback-client"))
+		e.Opaque([]byte(name))
 		e.Uint32(program)
 		e.String(netid)
 		e.String(uaddr)
@@ -224,7 +224,7 @@ func callbackState(s *Server, id uint64) (addr string, up bool) {
 func TestCallbackProbeRecordsAnswer(t *testing.T) {
 	cb := startCBNullServer(t, 0x40000000, "answer")
 	tc := newTestClient(t, testFS(t))
-	id := setClientIDCallback(tc, 0x40000000, "tcp", cb.uaddr())
+	id := setClientIDCallback(tc, "callback-client", 0x40000000, "tcp", cb.uaddr())
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -242,7 +242,7 @@ func TestCallbackUnusableAddressSkipsProbe(t *testing.T) {
 	tc := newTestClient(t, testFS(t))
 	// The harness default: an unspecified address with port zero, which real
 	// clients send when they run no callback service.
-	id := setClientIDCallback(tc, 0x40000000, "tcp", "0.0.0.0.0.0")
+	id := setClientIDCallback(tc, "callback-client", 0x40000000, "tcp", "0.0.0.0.0.0")
 	if addr, up := callbackState(tc.s, id); addr != "" || up {
 		t.Fatalf("callback path = %q, up = %v, want none", addr, up)
 	}
@@ -256,7 +256,7 @@ func TestCallbackStallDoesNotDelayConfirm(t *testing.T) {
 	cb := startCBNullServer(t, 0x40000000, "stall")
 	tc := newTestClient(t, testFS(t))
 	start := time.Now()
-	id := setClientIDCallback(tc, 0x40000000, "tcp", cb.uaddr())
+	id := setClientIDCallback(tc, "callback-client", 0x40000000, "tcp", cb.uaddr())
 	if took := time.Since(start); took > callbackTimeout/2 {
 		t.Fatalf("SETCLIENTID round trips took %v with a stalled callback path", took)
 	}

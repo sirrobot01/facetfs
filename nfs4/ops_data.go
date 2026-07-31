@@ -42,7 +42,11 @@ func (c *compound) ioState(stateSeq uint32, other [12]byte, write bool) (*openFi
 		if access&needed == 0 {
 			return nil, false, nfs4ErrOpenMode
 		}
-		return file, false, nfs4OK
+		if file != nil {
+			return file, false, nfs4OK
+		}
+		// A delegation stateid resolves with no open file behind it; it is
+		// served like the special stateids, for the length of the request.
 	}
 	if c.s.state.denyBlocksAnonymous(c.fh, write) {
 		return nil, false, nfs4ErrLocked

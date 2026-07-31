@@ -21,18 +21,20 @@ type stateStore struct {
 	epoch     [4]byte
 	lastSweep time.Time
 
-	nextClient  uint64
-	nextOther   uint64
-	confirmed   map[uint64]*client
-	unconfirmed map[uint64]*client
-	byOwner     map[string]*client // confirmed records by nfs_client_id4.id
-	opens       map[[12]byte]*openState
-	stateOwners map[[12]byte]*owner
-	byPath      map[string][]*openState
-	locks       map[[12]byte]*lockState
-	locksByPath map[string][]*lockState
-	expired     map[[12]byte]time.Time
-	expiredIDs  map[uint64]time.Time
+	nextClient   uint64
+	nextOther    uint64
+	confirmed    map[uint64]*client
+	unconfirmed  map[uint64]*client
+	byOwner      map[string]*client // confirmed records by nfs_client_id4.id
+	opens        map[[12]byte]*openState
+	stateOwners  map[[12]byte]*owner
+	byPath       map[string][]*openState
+	locks        map[[12]byte]*lockState
+	locksByPath  map[string][]*lockState
+	delegs       map[[12]byte]*delegation
+	delegsByPath map[string][]*delegation
+	expired      map[[12]byte]time.Time
+	expiredIDs   map[uint64]time.Time
 }
 
 type client struct {
@@ -49,6 +51,19 @@ type client struct {
 	// opens counts the client's live open states. Each holds a file open, so
 	// this is what bounds its share of the file descriptors.
 	opens int
+	// delegs counts the client's live delegations, bounded like every other
+	// state a client can grow.
+	delegs int
+}
+
+// delegation is one read delegation (RFC 7530 §10): a client's right to
+// cache a path without checking back. It has its own stateid and is backed
+// by no open file.
+type delegation struct {
+	other  [12]byte
+	seq    uint32
+	client *client
+	path   string
 }
 
 // owner is an open-owner or lock-owner: the unit of sequence-id discipline
@@ -97,18 +112,20 @@ func (o *openState) stateid() ([12]byte, uint32) { return o.other, o.seq }
 
 func newStateStore(lease time.Duration) *stateStore {
 	st := &stateStore{
-		now:         time.Now,
-		lease:       lease,
-		confirmed:   map[uint64]*client{},
-		unconfirmed: map[uint64]*client{},
-		byOwner:     map[string]*client{},
-		opens:       map[[12]byte]*openState{},
-		stateOwners: map[[12]byte]*owner{},
-		byPath:      map[string][]*openState{},
-		locks:       map[[12]byte]*lockState{},
-		locksByPath: map[string][]*lockState{},
-		expired:     map[[12]byte]time.Time{},
-		expiredIDs:  map[uint64]time.Time{},
+		now:          time.Now,
+		lease:        lease,
+		confirmed:    map[uint64]*client{},
+		unconfirmed:  map[uint64]*client{},
+		byOwner:      map[string]*client{},
+		opens:        map[[12]byte]*openState{},
+		stateOwners:  map[[12]byte]*owner{},
+		byPath:       map[string][]*openState{},
+		locks:        map[[12]byte]*lockState{},
+		locksByPath:  map[string][]*lockState{},
+		delegs:       map[[12]byte]*delegation{},
+		delegsByPath: map[string][]*delegation{},
+		expired:      map[[12]byte]time.Time{},
+		expiredIDs:   map[uint64]time.Time{},
 	}
 	rand.Read(st.epoch[:])
 	return st
@@ -233,7 +250,84 @@ func (st *stateStore) releaseLocked(c *client) []*openFile {
 			st.removeLockStateLocked(l)
 		}
 	}
+	for _, dl := range st.delegs {
+		if dl.client == c {
+			st.dropDelegationLocked(dl)
+		}
+	}
 	return files
+}
+
+// grantDelegationLocked decides whether an OPEN may carry a read delegation
+// and mints one when it may (RFC 7530 §10.4). Only a read-only open by a
+// confirmed owner whose callback path answered qualifies, and only when no
+// other client could make the promise false: a writable or deny-read open
+// held by another client refuses the grant. A client that already holds a
+// delegation on the path keeps using it and gets no second one.
+func (st *stateStore) grantDelegationLocked(path string, o *owner, access uint32) *delegation {
+	c := o.client
+	if !c.cbUp || !o.confirmed || access != shareRead || c.delegs >= maxDelegationsPerClient {
+		return nil
+	}
+	for _, held := range st.byPath[path] {
+		if held.client != c && (held.access&shareWrite != 0 || held.deny&denyRead != 0) {
+			return nil
+		}
+	}
+	for _, dl := range st.delegsByPath[path] {
+		if dl.client == c {
+			return nil
+		}
+	}
+	dl := &delegation{other: st.newOther(), seq: 1, client: c, path: path}
+	st.delegs[dl.other] = dl
+	st.delegsByPath[path] = append(st.delegsByPath[path], dl)
+	c.delegs++
+	return dl
+}
+
+// returnDelegation implements DELEGRETURN (RFC 7530 §16.7).
+func (st *stateStore) returnDelegation(seq uint32, other [12]byte, p string) nfsStat {
+	if other == ([12]byte{}) || other == allOnesOther {
+		return nfs4ErrBadStateID
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if [4]byte(other[:4]) != st.epoch {
+		return nfs4ErrStaleStateID
+	}
+	if _, expired := st.expired[other]; expired {
+		return nfs4ErrExpired
+	}
+	dl, ok := st.delegs[other]
+	switch {
+	case !ok:
+		return nfs4ErrBadStateID
+	case seq < dl.seq:
+		return nfs4ErrOldStateID
+	case seq > dl.seq, dl.path != p:
+		return nfs4ErrBadStateID
+	}
+	st.dropDelegationLocked(dl)
+	dl.client.lastRenew = st.now()
+	return nfs4OK
+}
+
+func (st *stateStore) dropDelegationLocked(dl *delegation) {
+	delete(st.delegs, dl.other)
+	dl.client.delegs--
+	delegs := st.delegsByPath[dl.path]
+	for i, held := range delegs {
+		if held == dl {
+			delegs = append(delegs[:i], delegs[i+1:]...)
+			break
+		}
+	}
+	if len(delegs) == 0 {
+		delete(st.delegsByPath, dl.path)
+	} else {
+		st.delegsByPath[dl.path] = delegs
+	}
 }
 
 func (st *stateStore) removeLockStateLocked(l *lockState) {
@@ -415,6 +509,17 @@ func (st *stateStore) renamePath(from, to string) {
 		}
 		st.locksByPath[target] = append(st.locksByPath[target], locks...)
 	}
+	for key, delegs := range st.delegsByPath {
+		target, ok := moved(key)
+		if !ok {
+			continue
+		}
+		delete(st.delegsByPath, key)
+		for _, dl := range delegs {
+			dl.path, _ = moved(dl.path)
+		}
+		st.delegsByPath[target] = append(st.delegsByPath[target], delegs...)
+	}
 }
 
 // denyBlocksAnonymous reports whether an owner's deny bits refuse the access
@@ -552,6 +657,18 @@ func (st *stateStore) resolveIOStateid(seq uint32, other [12]byte, path string) 
 				return nil, 0, false, nfs4ErrBadStateID
 			}
 			return l.open.file, l.open.access, false, nfs4OK
+		}
+		if dl, delegOK := st.delegs[other]; delegOK {
+			dl.client.lastRenew = st.now()
+			switch {
+			case seq < dl.seq:
+				return nil, 0, false, nfs4ErrOldStateID
+			case seq > dl.seq, dl.path != path:
+				return nil, 0, false, nfs4ErrBadStateID
+			}
+			// A read delegation carries read access and is backed by no open
+			// file; the caller serves it with a request-scoped open.
+			return nil, shareRead, false, nfs4OK
 		}
 	}
 	if ok {

@@ -23,8 +23,12 @@ type testClient struct {
 
 func newTestClient(t *testing.T, fsys facetfs.FileSystem) *testClient {
 	t.Helper()
+	return newTestClientFor(t, &Server{FileSystem: fsys})
+}
+
+func newTestClientFor(t *testing.T, s *Server) *testClient {
+	t.Helper()
 	server, client := net.Pipe()
-	s := &Server{FileSystem: fsys}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan error, 1)
 	go func() { done <- s.ServeConn(ctx, server) }()

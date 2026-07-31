@@ -42,6 +42,13 @@ type Server struct {
 	MaxWriteBytes uint32
 	// MaxDirectoryEntries caps one directory listing. Zero means 100 000.
 	MaxDirectoryEntries int
+	// ReadDelegations grants read delegations to clients whose callback path
+	// answers, letting them serve repeated reads from their own cache. Off by
+	// default, and safe only when this server is the only writer: a write
+	// that arrives outside it — through another protocol or from the
+	// application itself — recalls nothing, so a delegated client would keep
+	// serving stale data.
+	ReadDelegations bool
 	// Logger, if set, receives per-connection faults from Serve.
 	Logger func(error)
 

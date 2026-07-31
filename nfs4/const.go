@@ -220,9 +220,11 @@ const (
 	maxLockRanges      = 1 << 12
 	// maxExclusiveCreates bounds the remembered exclusive-create verifiers.
 	maxExclusiveCreates = 1 << 12
-	maxNameBytes        = 255
-	maxLinkData         = 4096
-	maxCredBytes        = 400
-	maxAuthSysGids      = 16
-	maxFHBytes          = 128
+	// maxDelegationsPerClient bounds the delegations one client can hold.
+	maxDelegationsPerClient = 1 << 12
+	maxNameBytes            = 255
+	maxLinkData             = 4096
+	maxCredBytes            = 400
+	maxAuthSysGids          = 16
+	maxFHBytes              = 128
 )

@@ -48,6 +48,13 @@ func (st *stateStore) sweepExpired() {
 				st.expired[other] = now
 			}
 		}
+		// Lease expiry revokes the client's delegations with the rest of its
+		// state; the tombstone turns their later use into NFS4ERR_EXPIRED.
+		for other, dl := range st.delegs {
+			if dl.client == client {
+				st.expired[other] = now
+			}
+		}
 		files = append(files, st.releaseLocked(client)...)
 	}
 	st.mu.Unlock()
