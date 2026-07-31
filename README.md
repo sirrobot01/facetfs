@@ -49,6 +49,7 @@ Optional interfaces unlock protocol features:
 | `SetStatFS` | `Chmod, Chtimes, Truncate` | SFTP `setstat`, NFS `SETATTR`            |
 | `StatVFSFS` | `StatVFS`                  | SFTP `statvfs`, NFS space attributes     |
 | `LinkFS`    | `Link`                     | NFS `LINK` and the `link_support` attribute |
+| `RemoveFS`  | `Remove`                   | removing a directory without deleting a subtree |
 
 A `File` may also implement `io.ReaderAt` and `io.WriterAt`, which let SFTP and
 NFS serve positioned reads and writes in parallel, and `Sync() error`, which

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -195,6 +196,30 @@ func (m *memFS) OpenFile(ctx context.Context, name string, flag int, perm fs.Fil
 		appendTo: flag&os.O_APPEND != 0,
 	}, nil
 }
+
+func (m *memFS) Remove(ctx context.Context, name string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	parent, base, err := m.parentOf(name)
+	if err != nil {
+		return pathError("remove", name, err)
+	}
+	node, ok := parent.children[base]
+	if !ok {
+		return pathError("remove", name, fs.ErrNotExist)
+	}
+	if node.mode.IsDir() && len(node.children) != 0 {
+		return pathError("remove", name, errNotEmpty)
+	}
+	delete(parent.children, base)
+	parent.touch()
+	return nil
+}
+
+// errNotEmpty reports a directory that still holds entries. It carries
+// syscall.ENOTEMPTY so protocol packages map it the way they map the same
+// condition from a native filesystem.
+var errNotEmpty = syscall.ENOTEMPTY
 
 func (m *memFS) RemoveAll(ctx context.Context, name string) error {
 	m.mu.Lock()

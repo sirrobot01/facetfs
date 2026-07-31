@@ -52,6 +52,17 @@ type LinkFS interface {
 	Link(ctx context.Context, oldName, newName string) error
 }
 
+// RemoveFS is implemented by filesystems that can remove a single file or an
+// empty directory. Protocols that must refuse to remove a directory holding
+// entries use it, because checking that a directory is empty and then calling
+// RemoveAll would delete anything created in between.
+type RemoveFS interface {
+	FileSystem
+	// Remove deletes a file or an empty directory. It reports an error for a
+	// directory that still holds entries.
+	Remove(ctx context.Context, name string) error
+}
+
 // SetStatFS is implemented by filesystems that can change metadata by path.
 // SFTP uses it to serve setstat requests.
 type SetStatFS interface {

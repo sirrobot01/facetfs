@@ -43,6 +43,15 @@ func (d Dir) OpenFile(_ context.Context, name string, flag int, perm fs.FileMode
 	return root.OpenFile(d.resolve(name), flag, perm)
 }
 
+func (d Dir) Remove(_ context.Context, name string) error {
+	root, err := d.root()
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.Remove(d.resolve(name))
+}
+
 func (d Dir) RemoveAll(_ context.Context, name string) error {
 	root, err := d.root()
 	if err != nil {

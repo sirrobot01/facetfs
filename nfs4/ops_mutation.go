@@ -27,7 +27,11 @@ type setAttrValues struct {
 	applied bitmap
 }
 
-func decodeSetAttrs(mask bitmap, vals []byte) (*setAttrValues, nfsStat) {
+// decodeSetAttrs reads the attributes a request wants to change. An
+// attribute the server reports but cannot set is read-only and gets
+// NFS4ERR_INVAL; NFS4ERR_ATTRNOTSUPP is reserved for one the server does not
+// have at all (RFC 7530 §16.32.4).
+func decodeSetAttrs(supported bitmap, mask bitmap, vals []byte) (*setAttrValues, nfsStat) {
 	a := &setAttrValues{}
 	d := xdr.NewDecoder(vals)
 	for i := 0; i < maxBitmapWords*32; i++ {
@@ -58,6 +62,9 @@ func decodeSetAttrs(mask bitmap, vals []byte) (*setAttrValues, nfsStat) {
 			}
 			a.mtime = &v
 		default:
+			if supported.has(i) {
+				return a, nfs4ErrInval
+			}
 			return a, nfs4ErrAttrNotSupp
 		}
 	}
@@ -151,9 +158,19 @@ func (c *compound) setAttr(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 		encodeBitmap(e, nil)
 		return nfs4ErrBadXDR
 	}
-	a, st := decodeSetAttrs(mask, vals)
+	a, st := decodeSetAttrs(c.s.supported, mask, vals)
 	if st == nfs4OK && !c.hasFH {
 		st = nfs4ErrNoFilehandle
+	}
+	if st == nfs4OK && a.size != nil {
+		// A directory has no size to set (RFC 7530 §16.32.4).
+		fi, err := c.lstatOrStat(c.fh)
+		switch {
+		case err != nil:
+			st = fhErr(err)
+		case fi.IsDir():
+			st = nfs4ErrIsDir
+		}
 	}
 	var access uint32
 	if st == nfs4OK {
@@ -192,7 +209,7 @@ func (c *compound) create(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	if nameStatus != nfs4OK {
 		return status(e, nameStatus)
 	}
-	attrs, st := decodeSetAttrs(mask, vals)
+	attrs, st := decodeSetAttrs(c.s.supported, mask, vals)
 	if st != nfs4OK {
 		return status(e, st)
 	}
@@ -275,14 +292,23 @@ func (c *compound) remove(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	if err != nil {
 		return status(e, nameErr(err))
 	}
-	if fi.IsDir() {
-		if st := c.requireEmptyDir(target); st != nfs4OK {
-			return status(e, st)
-		}
-	}
 	before := c.changeOfDir(c.fh)
-	if err := c.s.FileSystem.RemoveAll(c.ctx, target); err != nil {
-		return status(e, nameErr(err))
+	// A non-recursive remove refuses a directory holding entries by itself.
+	// Falling back to checking and then calling the recursive RemoveAll would
+	// delete whatever was created in between.
+	if remover, ok := c.s.FileSystem.(facetfs.RemoveFS); ok {
+		if err := remover.Remove(c.ctx, target); err != nil {
+			return status(e, nameErr(err))
+		}
+	} else {
+		if fi.IsDir() {
+			if st := c.requireEmptyDir(target); st != nfs4OK {
+				return status(e, st)
+			}
+		}
+		if err := c.s.FileSystem.RemoveAll(c.ctx, target); err != nil {
+			return status(e, nameErr(err))
+		}
 	}
 	e.Uint32(uint32(nfs4OK))
 	encodeChangeInfo(e, before, c.changeOfDir(c.fh))

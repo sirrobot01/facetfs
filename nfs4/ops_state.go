@@ -206,7 +206,7 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 		return status(e, st)
 	}
 
-	attrs, st := decodeSetAttrs(attrMask, attrVals)
+	attrs, st := decodeSetAttrs(c.s.supported, attrMask, attrVals)
 	if st != nfs4OK {
 		return status(e, st)
 	}
@@ -249,8 +249,17 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 	}
 	state.mu.Unlock()
 
+	// A truncating open arrives as a size of zero in the create attributes.
+	// Serving it through the open flag rather than through SetStatFS is what
+	// lets a filesystem that implements only the core interface be truncated,
+	// and it is how Linux opens a file with O_TRUNC.
+	truncating := openType == openCreate && attrs.size != nil && *attrs.size == 0
+	if truncating {
+		attrs.size = nil
+		attrs.applied.set(attrSize)
+	}
 	flags := openFlags(unionAccess)
-	needOpen := held == nil || held.flag != flags
+	needOpen := held == nil || held.flag != flags || truncating
 	var replacement *openFile
 	if needOpen {
 		openFlags := flags
@@ -259,6 +268,9 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 			if createMode == createGuarded {
 				openFlags |= os.O_EXCL
 			}
+		}
+		if truncating {
+			openFlags |= os.O_TRUNC
 		}
 		perm := os.FileMode(0o666)
 		if attrs.mode != nil {

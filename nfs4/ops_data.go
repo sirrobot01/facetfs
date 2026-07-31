@@ -44,6 +44,9 @@ func (c *compound) ioState(stateSeq uint32, other [12]byte, write bool) (*openFi
 		}
 		return file, false, nfs4OK
 	}
+	if c.s.state.denyBlocksAnonymous(c.fh, write) {
+		return nil, false, nfs4ErrLocked
+	}
 	flags := os.O_RDONLY
 	if write {
 		flags = os.O_WRONLY
@@ -65,9 +68,9 @@ func (c *compound) read(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	if offset > math.MaxInt64 || uint64(count) > uint64(math.MaxInt64)-offset {
 		return status(e, nfs4ErrInval)
 	}
-	if count > c.s.maxRead() {
-		return status(e, nfs4ErrResource)
-	}
+	// A READ may return fewer bytes than asked for (RFC 7530 §16.23.3), which
+	// is friendlier than refusing a client that did not read maxread first.
+	count = min(count, c.s.maxRead())
 	f, temporary, st := c.ioState(stateSeq, other, false)
 	if st != nfs4OK {
 		return status(e, st)
@@ -109,9 +112,14 @@ func (c *compound) write(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	stateSeq, other := decodeStateid(d)
 	offset := d.Uint64()
 	stable := d.Uint32()
-	data := d.Opaque(c.s.maxWrite())
+	data := d.Opaque(uint32(c.s.requestCap()))
 	if d.Err() != nil {
 		return status(e, nfs4ErrBadXDR)
+	}
+	// A WRITE larger than maxwrite is answered with a short write, which the
+	// reply's count already reports, rather than a framing error.
+	if uint32(len(data)) > c.s.maxWrite() {
+		data = data[:c.s.maxWrite()]
 	}
 	if offset > math.MaxInt64 || uint64(len(data)) > uint64(math.MaxInt64)-offset {
 		return status(e, nfs4ErrInval)

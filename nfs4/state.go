@@ -400,6 +400,25 @@ func (st *stateStore) renamePath(from, to string) {
 	}
 }
 
+// denyBlocksAnonymous reports whether an owner's deny bits refuse the access
+// a special stateid asks for. RFC 7530 §9.1.4.3 requires the check: a client
+// must not reach through the anonymous stateid what its own OPEN would be
+// refused.
+func (st *stateStore) denyBlocksAnonymous(path string, write bool) bool {
+	needed := uint32(shareRead)
+	if write {
+		needed = shareWrite
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for _, held := range st.byPath[path] {
+		if held.deny&needed != 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // openFilesFor returns the live open files for a path, which COMMIT flushes.
 func (st *stateStore) openFilesFor(p string) []*openFile {
 	st.mu.Lock()

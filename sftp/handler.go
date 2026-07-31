@@ -192,6 +192,9 @@ func (h *handler) Filecmd(request *pkgsftp.Request) error {
 		if fi.IsDir() {
 			return pkgsftp.ErrSSHFxFailure
 		}
+		if remover, ok := h.fs.(facetfs.RemoveFS); ok {
+			return wireError(remover.Remove(ctx, p))
+		}
 		return wireError(h.fs.RemoveAll(ctx, p))
 	case "Rmdir":
 		return h.rmdir(ctx, p)
@@ -252,9 +255,10 @@ func (h *handler) setstat(ctx context.Context, request *pkgsftp.Request, p strin
 	return nil
 }
 
-// rmdir removes an empty directory. The emptiness check and the removal are
-// separate FileSystem calls, so the operation is best-effort rather than
-// atomic.
+// rmdir removes an empty directory. A FileSystem implementing
+// facetfs.RemoveFS refuses a directory holding entries itself; otherwise the
+// emptiness check and the removal are separate calls, which makes the
+// operation best-effort rather than atomic.
 func (h *handler) rmdir(ctx context.Context, p string) error {
 	fi, err := h.fs.Stat(ctx, p)
 	if err != nil {
@@ -262,6 +266,9 @@ func (h *handler) rmdir(ctx context.Context, p string) error {
 	}
 	if !fi.IsDir() {
 		return pkgsftp.ErrSSHFxFailure
+	}
+	if remover, ok := h.fs.(facetfs.RemoveFS); ok {
+		return wireError(remover.Remove(ctx, p))
 	}
 	dir, err := h.fs.OpenFile(ctx, p, os.O_RDONLY, 0)
 	if err != nil {
