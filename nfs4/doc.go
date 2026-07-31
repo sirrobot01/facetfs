@@ -1,4 +1,4 @@
-// Package nfs4 provides an experimental embeddable NFSv4.0 server that serves
+// Package nfs4 provides an embeddable NFSv4.0 server that serves
 // a facetfs.FileSystem on caller-supplied net.Listener or net.Conn values. The
 // caller owns the transport, credentials, and export policy.
 //

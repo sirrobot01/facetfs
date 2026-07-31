@@ -30,6 +30,7 @@ func main() {
 	root := flag.String("root", ".", "directory to serve")
 	delegations := flag.Bool("delegations", false,
 		"grant read delegations; safe only when NFS is the only writer")
+	lease := flag.Duration("lease", 0, "client lease duration (0 means the default)")
 	flag.Parse()
 
 	served, err := facetfs.OpenDir(*root)
@@ -48,6 +49,7 @@ func main() {
 	server := &nfs4.Server{
 		FileSystem:      served,
 		ReadDelegations: *delegations,
+		LeaseDuration:   *lease,
 		Logger:          func(err error) { log.Printf("connection: %v", err) },
 	}
 	log.Printf("serving %s at %s", *root, listener.Addr())

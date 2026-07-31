@@ -14,7 +14,7 @@ package is independent. Import only what you use.
 | -------- | -------------- | -------------------------------------- | ----------- |
 | `webdav` | WebDAV (HTTP)  | an `http.Server` and auth middleware   | usable      |
 | `sftp`   | SFTP           | an SSH server and an accepted channel  | usable      |
-| `nfs4`   | NFSv4.0        | a `net.Listener`                       | experimental |
+| `nfs4`   | NFSv4.0        | a `net.Listener`                       | usable      |
 | `smb`    | SMB2/SMB3      | a `net.Listener`                       | planned     |
 
 ## The filesystem interface
@@ -126,10 +126,11 @@ Mount it from macOS or Linux:
 sudo mount -t nfs -o vers=4.0,tcp,port=20490 localhost:/ /tmp/nfsmnt
 ```
 
-This package is experimental. NFSv4 carries only AUTH_SYS identities, so serve
-it on a trusted network or behind your own authentication boundary.
-Filehandles and protocol state do not survive a restart, and byte-range locks
-are advisory. See [examples/nfs](./examples/nfs).
+NFSv4 carries only AUTH_SYS identities, so serve it on a trusted network or
+behind your own authentication boundary. Filehandles and protocol state do
+not survive a restart, and byte-range locks are advisory. Read delegations
+are off by default and safe only when the NFS server is the only writer. See
+[examples/nfs](./examples/nfs).
 
 ## Examples
 

@@ -30,7 +30,7 @@ sleep 1
 docker run --rm --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
 	--add-host=host.docker.internal:host-gateway \
 	-e PORT="$port" debian:bookworm-slim bash -euxc '
-	apt-get update -qq && apt-get install -y -qq nfs-common >/dev/null
+	apt-get update -qq && apt-get install -y -qq nfs-common socat procps >/dev/null
 	mkdir -p /mnt/nfs
 	# Locking is left on so the server-side LOCK operations are exercised.
 	mount -t nfs -o vers=4.0,port=$PORT,soft,timeo=50 \
@@ -76,6 +76,39 @@ docker run --rm --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
 	# Once released it is available again.
 	flock -w 5 -x /mnt/nfs/lockfile -c true
 	rm /mnt/nfs/lockfile
+
+	echo "--- disconnect with work in flight"
+	# The mount goes through a local proxy so the connection can be cut while
+	# operations are running. The mount is hard: the client must retry and
+	# reconnect, and every operation must land exactly once.
+	socat TCP-LISTEN:2050,fork,reuseaddr TCP:host.docker.internal:$PORT &
+	mkdir -p /mnt/nfs2
+	mount -t nfs -o vers=4.0,port=2050 127.0.0.1:/ /mnt/nfs2
+	mkdir /mnt/nfs2/burst
+	(
+		for i in $(seq 1 300); do
+			echo "payload $i" > /mnt/nfs2/burst/f$i
+			flock -x /mnt/nfs2/burst/f$i -c true
+		done
+		touch /tmp/burst-done
+	) &
+	# Cut every connection part way through, then bring the path back.
+	while [ ! -e /mnt/nfs2/burst/f100 ]; do sleep 0.1; done
+	pkill -x socat
+	test ! -f /tmp/burst-done # the cut must land while work is in flight
+	sleep 2
+	socat TCP-LISTEN:2050,fork,reuseaddr TCP:host.docker.internal:$PORT &
+	for i in $(seq 1 120); do
+		[ -f /tmp/burst-done ] && break
+		sleep 1
+	done
+	test -f /tmp/burst-done
+	test "$(ls /mnt/nfs2/burst | wc -l)" -eq 300
+	for i in $(seq 1 300); do
+		test "$(cat /mnt/nfs2/burst/f$i)" = "payload $i"
+	done
+	rm -r /mnt/nfs2/burst
+	umount /mnt/nfs2
 
 	echo "--- remount"
 	echo persisted > /mnt/nfs/survivor
