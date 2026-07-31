@@ -19,7 +19,10 @@ mkdir -p "$root/export"
 echo "hello from the host" > "$root/export/greeting.txt"
 mkdir -p "$root/export/sub"
 
-"$root/nfsd" -addr "0.0.0.0:$port" -root "$root/export" &
+# Delegations stay enabled: the container's callback listener is not
+# reachable from the host, which is exactly the unreachable-callback case the
+# server must serve without granting or slowing anything.
+"$root/nfsd" -addr "0.0.0.0:$port" -root "$root/export" -delegations &
 server=$!
 trap 'kill $server 2>/dev/null || true; rm -rf "$root"' EXIT
 sleep 1

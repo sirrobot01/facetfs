@@ -7,4 +7,11 @@
 // Filehandles and protocol state are volatile across server restarts. AUTH_SYS
 // credentials must therefore be used only on a trusted transport or behind an
 // authentication boundary supplied by the caller.
+//
+// Read delegations (Server.ReadDelegations) are off by default. A delegation
+// promises a client that the file will not change without a recall first, and
+// this server can only recall what it sees: a write through another protocol
+// or by the application itself recalls nothing and a delegated client would
+// keep serving stale data. Enable delegations only when this NFS server is
+// the only writer.
 package nfs4
