@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -354,6 +355,48 @@ func (st *stateStore) ownerForStateid(other [12]byte) (*owner, nfsStat) {
 	}
 	o.client.lastRenew = st.now()
 	return o, nfs4OK
+}
+
+// renamePath moves open and lock state to follow a renamed object, including
+// everything under a renamed directory. Without it a byte-range lock would
+// keep guarding the old name, so a second client could lock the same file
+// through its new name, and a file later created at the old name would
+// inherit a lock nobody holds.
+func (st *stateStore) renamePath(from, to string) {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	moved := func(p string) (string, bool) {
+		switch {
+		case p == from:
+			return to, true
+		case strings.HasPrefix(p, from+"/"):
+			return to + p[len(from):], true
+		default:
+			return p, false
+		}
+	}
+	for key, opens := range st.byPath {
+		target, ok := moved(key)
+		if !ok {
+			continue
+		}
+		delete(st.byPath, key)
+		for _, open := range opens {
+			open.path, _ = moved(open.path)
+		}
+		st.byPath[target] = append(st.byPath[target], opens...)
+	}
+	for key, locks := range st.locksByPath {
+		target, ok := moved(key)
+		if !ok {
+			continue
+		}
+		delete(st.locksByPath, key)
+		for _, locked := range locks {
+			locked.path, _ = moved(locked.path)
+		}
+		st.locksByPath[target] = append(st.locksByPath[target], locks...)
+	}
 }
 
 // openFilesFor returns the live open files for a path, which COMMIT flushes.

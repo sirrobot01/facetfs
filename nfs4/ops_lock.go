@@ -323,14 +323,14 @@ func (c *compound) lock(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 			if opened.owner != openOwner || opened.client != lockOwner.client {
 				return status(result, nfs4ErrBadStateID)
 			}
-			if write && opened.access&shareWrite == 0 || !write && opened.access&shareRead == 0 {
-				return status(result, nfs4ErrOpenMode)
-			}
 			state := c.s.state
 			state.mu.Lock()
 			defer state.mu.Unlock()
 			if state.opens[opened.other] != opened {
 				return status(result, nfs4ErrBadStateID)
+			}
+			if write && opened.access&shareWrite == 0 || !write && opened.access&shareRead == 0 {
+				return status(result, nfs4ErrOpenMode)
 			}
 			// The lock-owner already has state for this file, so the client
 			// should have used the existing-owner form. NFS4ERR_BAD_SEQID
@@ -376,14 +376,18 @@ func (c *compound) lock(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 		if st != nfs4OK {
 			return status(result, st)
 		}
-		if write && locked.open.access&shareWrite == 0 || !write && locked.open.access&shareRead == 0 {
-			return status(result, nfs4ErrOpenMode)
-		}
 		state := c.s.state
 		state.mu.Lock()
 		defer state.mu.Unlock()
 		if state.locks[lockOther] != locked || state.opens[locked.open.other] != locked.open {
 			return status(result, nfs4ErrBadStateID)
+		}
+		// The open's access bits are read here, not before taking the lock:
+		// OPEN_DOWNGRADE runs under the open-owner's mutex, which this path
+		// does not hold, so a check outside could grant a write lock on an
+		// open that has just become read-only.
+		if write && locked.open.access&shareWrite == 0 || !write && locked.open.access&shareRead == 0 {
+			return status(result, nfs4ErrOpenMode)
 		}
 		if conflictState, held := state.lockConflictLocked(c.fh, lockOwner, rng); conflictState != nil {
 			return encodeDenied(result, conflictState, held)

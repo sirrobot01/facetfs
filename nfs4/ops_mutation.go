@@ -360,6 +360,7 @@ func (c *compound) rename(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 		if err := c.s.FileSystem.Rename(c.ctx, oldPath, newPath); err != nil {
 			return status(e, nameErr(err))
 		}
+		c.s.state.renamePath(oldPath, newPath)
 	}
 	e.Uint32(uint32(nfs4OK))
 	encodeChangeInfo(e, oldBefore, c.changeOfDir(c.saved))
