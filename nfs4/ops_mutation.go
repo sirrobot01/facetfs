@@ -276,17 +276,8 @@ func (c *compound) remove(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 		return status(e, nameErr(err))
 	}
 	if fi.IsDir() {
-		dir, err := c.s.FileSystem.OpenFile(c.ctx, target, os.O_RDONLY, 0)
-		if err != nil {
-			return status(e, nameErr(err))
-		}
-		entries, readErr := dir.Readdir(1)
-		dir.Close()
-		if readErr != nil && !errors.Is(readErr, io.EOF) {
-			return status(e, nameErr(readErr))
-		}
-		if len(entries) != 0 {
-			return status(e, nfs4ErrNotEmpty)
+		if st := c.requireEmptyDir(target); st != nfs4OK {
+			return status(e, st)
 		}
 	}
 	before := c.changeOfDir(c.fh)
@@ -295,6 +286,25 @@ func (c *compound) remove(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	}
 	e.Uint32(uint32(nfs4OK))
 	encodeChangeInfo(e, before, c.changeOfDir(c.fh))
+	return nfs4OK
+}
+
+// requireEmptyDir reports NFS4ERR_NOTEMPTY unless the directory is empty.
+// Callers must use it before any removal, because FileSystem.RemoveAll
+// deletes a subtree.
+func (c *compound) requireEmptyDir(p string) nfsStat {
+	dir, err := c.s.FileSystem.OpenFile(c.ctx, p, os.O_RDONLY, 0)
+	if err != nil {
+		return nameErr(err)
+	}
+	entries, readErr := dir.Readdir(1)
+	dir.Close()
+	if readErr != nil && !errors.Is(readErr, io.EOF) {
+		return nameErr(readErr)
+	}
+	if len(entries) != 0 {
+		return nfs4ErrNotEmpty
+	}
 	return nfs4OK
 }
 
@@ -326,6 +336,24 @@ func (c *compound) rename(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	}
 	if fi.IsDir() && (newPath == oldPath || strings.HasPrefix(newPath, oldPath+"/")) && newPath != oldPath {
 		return status(e, nfs4ErrInval)
+	}
+	// FileSystem.Rename replaces the target, so the type rules POSIX enforces
+	// are this layer's to apply: without them a file silently replaces a
+	// directory, or a directory replaces a file and its contents.
+	if newPath != oldPath {
+		switch target, err := c.lstatOrStat(newPath); {
+		case err != nil && nameErr(err) != nfs4ErrNoEnt:
+			return status(e, nameErr(err))
+		case err != nil:
+		case fi.IsDir() && !target.IsDir():
+			return status(e, nfs4ErrNotDir)
+		case !fi.IsDir() && target.IsDir():
+			return status(e, nfs4ErrIsDir)
+		case target.IsDir():
+			if st := c.requireEmptyDir(newPath); st != nfs4OK {
+				return status(e, st)
+			}
+		}
 	}
 	oldBefore, newBefore := c.changeOfDir(c.saved), c.changeOfDir(c.fh)
 	if oldPath != newPath {
