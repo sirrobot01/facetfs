@@ -356,6 +356,19 @@ func (st *stateStore) ownerForStateid(other [12]byte) (*owner, nfsStat) {
 	return o, nfs4OK
 }
 
+// openFilesFor returns the live open files for a path, which COMMIT flushes.
+func (st *stateStore) openFilesFor(p string) []*openFile {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	var files []*openFile
+	for _, held := range st.byPath[p] {
+		if held.file != nil {
+			files = append(files, held.file)
+		}
+	}
+	return files
+}
+
 // openOwnerForStateid resolves the open-owner behind an open stateid. Unlike
 // ownerForStateid it refuses a lock stateid, so a client cannot name one owner
 // through both stateid slots of a LOCK and make the server take a single

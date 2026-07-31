@@ -115,9 +115,6 @@ func (c *compound) write(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	if temporary {
 		defer f.Close()
 	}
-	if len(data) != 0 && stable != unstable4 && !f.canSync() {
-		return status(e, nfs4ErrNotSupp)
-	}
 	n, err := f.WriteAt(data, int64(offset))
 	if n < 0 || n > len(data) {
 		return status(e, nfs4ErrServerFault)
@@ -125,15 +122,18 @@ func (c *compound) write(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	if err != nil {
 		return status(e, fhErr(err))
 	}
+	// Report FILE_SYNC4 only for a write this server actually flushed. A
+	// FileSystem whose File cannot sync gets UNSTABLE4, which asks the client
+	// for a COMMIT rather than claiming durability the server cannot provide.
 	committed := uint32(unstable4)
-	if len(data) == 0 {
-		committed = stable
-	} else if stable != unstable4 {
-		_, err := f.sync()
+	if stable != unstable4 && len(data) != 0 {
+		flushed, err := f.sync()
 		if err != nil {
 			return status(e, fhErr(err))
 		}
-		committed = fileSync4
+		if flushed {
+			committed = fileSync4
+		}
 	}
 	e.Uint32(uint32(nfs4OK))
 	e.Uint32(uint32(n))
@@ -164,18 +164,32 @@ func (c *compound) commit(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	if fi.Mode()&fs.ModeSymlink != 0 {
 		return status(e, nfs4ErrSymlink)
 	}
-	f, err := c.s.FileSystem.OpenFile(c.ctx, c.fh, os.O_WRONLY, 0)
-	if err != nil {
-		return status(e, fhErr(err))
+	// Flush the files the client actually wrote through: a FileSystem may
+	// buffer inside the File, so a fresh handle would flush nothing.
+	opens := c.s.state.openFilesFor(c.fh)
+	for _, open := range opens {
+		if _, err := open.sync(); err != nil {
+			return status(e, fhErr(err))
+		}
 	}
-	open := newOpenFile(f)
-	defer open.Close()
-	if !open.canSync() {
-		return status(e, nfs4ErrNotSupp)
+	if len(opens) == 0 {
+		// The data was written without an open stateid, so nothing this
+		// server holds is buffered. A read-only handle still lets a native
+		// filesystem flush the file's own dirty pages.
+		f, err := c.s.FileSystem.OpenFile(c.ctx, c.fh, os.O_RDONLY, 0)
+		if err != nil {
+			return status(e, fhErr(err))
+		}
+		open := newOpenFile(f)
+		_, syncErr := open.sync()
+		open.Close()
+		if syncErr != nil {
+			return status(e, fhErr(syncErr))
+		}
 	}
-	if _, err := open.sync(); err != nil {
-		return status(e, fhErr(err))
-	}
+	// A FileSystem with no sync at all still answers OK: the write verifier
+	// changes when the server restarts, which is what tells a client its
+	// unstable writes must be sent again.
 	e.Uint32(uint32(nfs4OK))
 	e.OpaqueFixed(c.s.verifier[:])
 	return nfs4OK

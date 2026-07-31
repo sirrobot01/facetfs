@@ -71,11 +71,6 @@ func (o *openFile) sync() (bool, error) {
 	return true, s.Sync()
 }
 
-func (o *openFile) canSync() bool {
-	_, ok := o.file.(interface{ Sync() error })
-	return ok
-}
-
 func (o *openFile) Stat() (fs.FileInfo, error) {
 	o.life.RLock()
 	defer o.life.RUnlock()
