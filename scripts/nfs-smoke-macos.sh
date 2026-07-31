@@ -4,6 +4,9 @@
 # macOS needs root to mount, so this script asks for a password. macOS speaks
 # NFSv4.0 only, which is the version this package serves.
 #
+# Lock contention is covered by scripts/nfs-smoke-linux.sh, because macOS has
+# no flock command to drive it from a shell.
+#
 # Usage: sudo scripts/nfs-smoke-macos.sh [port]
 set -euo pipefail
 

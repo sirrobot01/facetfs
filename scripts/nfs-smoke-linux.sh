@@ -29,7 +29,8 @@ docker run --rm --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
 	-e PORT="$port" debian:bookworm-slim bash -euxc '
 	apt-get update -qq && apt-get install -y -qq nfs-common >/dev/null
 	mkdir -p /mnt/nfs
-	mount -t nfs -o vers=4.0,port=$PORT,nolock,soft,timeo=50 \
+	# Locking is left on so the server-side LOCK operations are exercised.
+	mount -t nfs -o vers=4.0,port=$PORT,soft,timeo=50 \
 		host.docker.internal:/ /mnt/nfs
 
 	echo "--- listing"
@@ -57,6 +58,29 @@ docker run --rm --cap-add SYS_ADMIN --security-opt apparmor=unconfined \
 	for i in $(seq 1 500); do : > /mnt/nfs/many/f$i; done
 	test "$(ls /mnt/nfs/many | wc -l)" -eq 500
 	rm -r /mnt/nfs/many
+
+	echo "--- byte-range locks between two processes"
+	: > /mnt/nfs/lockfile
+	flock -x /mnt/nfs/lockfile -c "sleep 3" &
+	holder=$!
+	sleep 1
+	# The lock is held, so a second taker must not get it.
+	if flock -w 1 -x /mnt/nfs/lockfile -c true; then
+		echo "FAIL: a held lock was granted to a second process"
+		exit 1
+	fi
+	wait $holder
+	# Once released it is available again.
+	flock -w 5 -x /mnt/nfs/lockfile -c true
+	rm /mnt/nfs/lockfile
+
+	echo "--- remount"
+	echo persisted > /mnt/nfs/survivor
+	umount /mnt/nfs
+	mount -t nfs -o vers=4.0,port=$PORT,soft,timeo=50 \
+		host.docker.internal:/ /mnt/nfs
+	test "$(cat /mnt/nfs/survivor)" = persisted
+	rm /mnt/nfs/survivor
 
 	umount /mnt/nfs
 	echo "SMOKE OK"
