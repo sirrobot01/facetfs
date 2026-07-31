@@ -25,7 +25,7 @@ func (d Dir) root() (*os.Root, error) {
 	return os.OpenRoot(string(d))
 }
 
-func (d Dir) Mkdir(ctx context.Context, name string, perm fs.FileMode) error {
+func (d Dir) Mkdir(_ context.Context, name string, perm fs.FileMode) error {
 	root, err := d.root()
 	if err != nil {
 		return err
@@ -34,7 +34,7 @@ func (d Dir) Mkdir(ctx context.Context, name string, perm fs.FileMode) error {
 	return root.Mkdir(d.resolve(name), perm)
 }
 
-func (d Dir) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMode) (File, error) {
+func (d Dir) OpenFile(_ context.Context, name string, flag int, perm fs.FileMode) (File, error) {
 	root, err := d.root()
 	if err != nil {
 		return nil, err
@@ -43,7 +43,7 @@ func (d Dir) OpenFile(ctx context.Context, name string, flag int, perm fs.FileMo
 	return root.OpenFile(d.resolve(name), flag, perm)
 }
 
-func (d Dir) RemoveAll(ctx context.Context, name string) error {
+func (d Dir) RemoveAll(_ context.Context, name string) error {
 	root, err := d.root()
 	if err != nil {
 		return err
@@ -52,7 +52,7 @@ func (d Dir) RemoveAll(ctx context.Context, name string) error {
 	return root.RemoveAll(d.resolve(name))
 }
 
-func (d Dir) Rename(ctx context.Context, oldName, newName string) error {
+func (d Dir) Rename(_ context.Context, oldName, newName string) error {
 	root, err := d.root()
 	if err != nil {
 		return err
@@ -61,7 +61,7 @@ func (d Dir) Rename(ctx context.Context, oldName, newName string) error {
 	return root.Rename(d.resolve(oldName), d.resolve(newName))
 }
 
-func (d Dir) Stat(ctx context.Context, name string) (fs.FileInfo, error) {
+func (d Dir) Stat(_ context.Context, name string) (fs.FileInfo, error) {
 	root, err := d.root()
 	if err != nil {
 		return nil, err
@@ -70,7 +70,7 @@ func (d Dir) Stat(ctx context.Context, name string) (fs.FileInfo, error) {
 	return root.Stat(d.resolve(name))
 }
 
-func (d Dir) Link(ctx context.Context, oldName, newName string) error {
+func (d Dir) Link(_ context.Context, oldName, newName string) error {
 	root, err := d.root()
 	if err != nil {
 		return err

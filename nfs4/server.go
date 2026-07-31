@@ -51,6 +51,9 @@ type Server struct {
 	verifier  [8]byte
 	supported bitmap
 	state     *stateStore
+	sweepMu   sync.Mutex
+	sweepRefs int
+	sweepStop chan struct{}
 }
 
 func (s *Server) init() error {
@@ -113,6 +116,8 @@ func (s *Server) Serve(ctx context.Context, l net.Listener) error {
 	if err := s.init(); err != nil {
 		return err
 	}
+	stopSweeper := s.startSweeper()
+	defer stopSweeper()
 	done := make(chan struct{})
 	defer close(done)
 	go func() {
@@ -147,5 +152,7 @@ func (s *Server) ServeConn(ctx context.Context, c net.Conn) error {
 	if err := s.init(); err != nil {
 		return err
 	}
+	stopSweeper := s.startSweeper()
+	defer stopSweeper()
 	return s.serveConn(ctx, c)
 }

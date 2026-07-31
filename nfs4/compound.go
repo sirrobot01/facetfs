@@ -27,28 +27,45 @@ type opFunc func(*compound, *xdr.Decoder, *xdr.Encoder) nfsStat
 // opTable is indexed by op number; nil entries answer NFS4ERR_NOTSUPP.
 var opTable = [40]opFunc{
 	opAccess:             (*compound).access,
+	opClose:              (*compound).close,
+	opCommit:             (*compound).commit,
+	opCreate:             (*compound).create,
 	opGetAttr:            (*compound).getAttr,
 	opGetFH:              (*compound).getFH,
+	opLink:               (*compound).link,
+	opLock:               (*compound).lock,
+	opLockT:              (*compound).lockT,
+	opLockU:              (*compound).lockU,
 	opLookup:             (*compound).lookup,
 	opLookupP:            (*compound).lookupP,
 	opNVerify:            (*compound).nVerify,
+	opOpen:               (*compound).open,
+	opOpenConfirm:        (*compound).openConfirm,
+	opOpenDowngrade:      (*compound).openDowngrade,
 	opPutFH:              (*compound).putFH,
 	opPutPubFH:           (*compound).putRootFH,
 	opPutRootFH:          (*compound).putRootFH,
+	opRead:               (*compound).read,
 	opReadDir:            (*compound).readDir,
 	opReadLink:           (*compound).readLink,
+	opRemove:             (*compound).remove,
+	opRename:             (*compound).rename,
 	opRenew:              (*compound).renew,
 	opRestoreFH:          (*compound).restoreFH,
 	opSaveFH:             (*compound).saveFH,
 	opSecInfo:            (*compound).secInfo,
+	opSetAttr:            (*compound).setAttr,
 	opSetClientID:        (*compound).setClientID,
 	opSetClientIDConfirm: (*compound).setClientIDConfirm,
 	opVerify:             (*compound).verify,
+	opWrite:              (*compound).write,
+	opReleaseLockOwner:   (*compound).releaseLockOwner,
 }
 
 // compound executes one COMPOUND call (RFC 7530 §15.2). ok=false means the
 // top-level arguments did not decode: the RPC layer answers GARBAGE_ARGS.
 func (s *Server) compound(ctx context.Context, cred *authSysCred, d *xdr.Decoder) ([]byte, bool) {
+	s.state.sweepExpired()
 	tag := d.Opaque(maxTagBytes)
 	minor := d.Uint32()
 	numOps := d.Uint32()

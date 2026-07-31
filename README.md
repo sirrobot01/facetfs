@@ -14,7 +14,7 @@ package is independent. Import only what you use.
 | -------- | -------------- | -------------------------------------- | ----------- |
 | `webdav` | WebDAV (HTTP)  | an `http.Server` and auth middleware   | usable      |
 | `sftp`   | SFTP           | an SSH server and an accepted channel  | usable      |
-| `nfs4`   | NFSv4.0        | a `net.Listener`                       | planned     |
+| `nfs4`   | NFSv4.0        | a `net.Listener`                       | experimental |
 | `smb`    | SMB2/SMB3      | a `net.Listener`                       | planned     |
 
 ## The filesystem interface
@@ -43,11 +43,16 @@ Two implementations ship with the module:
 
 Optional interfaces unlock protocol features:
 
-| Interface   | Methods                      | Unlocks                        |
-| ----------- | ---------------------------- | ------------------------------ |
-| `SymlinkFS` | `Symlink, Readlink, Lstat`   | symlinks over SFTP and WebDAV  |
-| `SetStatFS` | `Chmod, Chtimes, Truncate`   | SFTP `setstat`                 |
-| `StatVFSFS` | `StatVFS`                    | SFTP `statvfs`                 |
+| Interface   | Methods                    | Unlocks                                  |
+| ----------- | -------------------------- | ---------------------------------------- |
+| `SymlinkFS` | `Symlink, Readlink, Lstat` | symlinks over SFTP, WebDAV, and NFS      |
+| `SetStatFS` | `Chmod, Chtimes, Truncate` | SFTP `setstat`, NFS `SETATTR`            |
+| `StatVFSFS` | `StatVFS`                  | SFTP `statvfs`, NFS space attributes     |
+| `LinkFS`    | `Link`                     | NFS `LINK` and the `link_support` attribute |
+
+A `File` may also implement `io.ReaderAt` and `io.WriterAt`, which let SFTP and
+NFS serve positioned reads and writes in parallel, and `Sync() error`, which
+backs NFS `COMMIT` and stable writes.
 
 A filesystem without an interface still works. The protocol packages refuse
 only the requests that need it.
@@ -88,6 +93,31 @@ if err := server.Serve(ctx, channel); err != nil {
 
 See [examples/sftp](./examples/sftp) for a complete program with host keys and
 `authorized_keys` verification.
+
+## NFSv4.0
+
+`nfs4.Server` serves NFSv4.0 on a listener you bind. Operating-system clients
+mount it directly. No portmapper or mountd is needed.
+
+```go
+server := &nfs4.Server{FileSystem: facetfs.Dir("/srv/data")}
+listener, err := net.Listen("tcp", "127.0.0.1:20490")
+if err != nil {
+    log.Fatal(err)
+}
+log.Fatal(server.Serve(ctx, listener))
+```
+
+Mount it from macOS or Linux:
+
+```sh
+sudo mount -t nfs -o vers=4.0,tcp,port=20490 localhost:/ /tmp/nfsmnt
+```
+
+This package is experimental. NFSv4 carries only AUTH_SYS identities, so serve
+it on a trusted network or behind your own authentication boundary.
+Filehandles and protocol state do not survive a restart, and byte-range locks
+are advisory. See [examples/nfs](./examples/nfs).
 
 ## Examples
 

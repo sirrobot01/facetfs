@@ -88,6 +88,10 @@ func (s *Server) supportedAttrs() bitmap {
 			b.set(n)
 		}
 	}
+	if _, ok := s.FileSystem.(facetfs.SetStatFS); ok {
+		b.set(attrTimeAccessSet)
+		b.set(attrTimeModifySet)
+	}
 	return b
 }
 
