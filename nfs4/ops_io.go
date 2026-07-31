@@ -77,13 +77,17 @@ listing:
 			if i < skip {
 				continue
 			}
-			var entry xdr.Encoder
-			entry.Bool(true) // another entry follows
-			entry.Uint64(i + 3)
-			entry.String(fi.Name())
-			encodeFattr(&entry, requested, &attrCtx{c: c, path: path.Join(c.fh, fi.Name()), fi: fi})
+			// The entry is encoded into the reply and rolled back if it does
+			// not fit, which keeps a large listing from allocating a buffer
+			// per entry.
+			mark := e.Len()
+			e.Bool(true) // another entry follows
+			e.Uint64(i + 3)
+			e.String(fi.Name())
+			encodeFattr(e, requested, &attrCtx{c: c, path: path.Join(c.fh, fi.Name()), fi: fi})
 			nameBudget -= len(fi.Name()) + 8
-			if e.Len()+entry.Len() > start+sizeBudget-8 || nameBudget < 0 {
+			if e.Len() > start+sizeBudget-8 || nameBudget < 0 {
+				e.Truncate(mark)
 				if emitted == 0 {
 					e.Truncate(start - 12)
 					return status(e, nfs4ErrTooSmall)
@@ -91,7 +95,6 @@ listing:
 				eof = false
 				break listing
 			}
-			e.OpaqueFixed(entry.Bytes())
 			emitted++
 		}
 		if len(page) == 0 || errors.Is(err, io.EOF) {

@@ -136,15 +136,20 @@ func encodeFattr(e *xdr.Encoder, requested bitmap, a *attrCtx) {
 			granted.set(i)
 		}
 	}
-	var vals xdr.Encoder
+	encodeBitmap(e, granted)
+	// The values are written in place and their length filled in afterwards.
+	// Every attribute encodes to a multiple of four bytes, so the opaque
+	// needs no padding.
+	lengthAt := e.Len()
+	e.Uint32(0)
+	from := e.Len()
 	for i := 0; i <= attrMountedOnFileID; i++ {
 		if !granted.has(i) {
 			continue
 		}
-		encodeAttrValue(&vals, i, a)
+		encodeAttrValue(e, i, a)
 	}
-	encodeBitmap(e, granted)
-	e.Opaque(vals.Bytes())
+	e.PatchUint32(lengthAt, uint32(e.Len()-from))
 }
 
 func encodeAttrValue(e *xdr.Encoder, attr int, a *attrCtx) {

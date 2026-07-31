@@ -288,3 +288,9 @@ func benchGetattrWithClients(b *testing.B, clients int) {
 func BenchmarkGetattr1Client(b *testing.B)    { benchGetattrWithClients(b, 1) }
 func BenchmarkGetattr100Clients(b *testing.B) { benchGetattrWithClients(b, 100) }
 func BenchmarkGetattr500Clients(b *testing.B) { benchGetattrWithClients(b, 500) }
+
+// The resume cost grows with the square of the entry count: each page
+// re-walks every entry before it.
+func BenchmarkReaddirScale500(b *testing.B)  { benchReaddir(b, 500, 8<<10) }
+func BenchmarkReaddirScale2000(b *testing.B) { benchReaddir(b, 2000, 8<<10) }
+func BenchmarkReaddirScale4000(b *testing.B) { benchReaddir(b, 4000, 8<<10) }
