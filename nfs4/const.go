@@ -209,9 +209,12 @@ const (
 	maxCompoundOps = 128
 	maxTagBytes    = 1024
 	maxInflight    = 16
-	maxNameBytes   = 255
-	maxLinkData    = 4096
-	maxCredBytes   = 400
-	maxAuthSysGids = 16
-	maxFHBytes     = 128
+	// maxCachedDirEntries bounds the entries held across all the directory
+	// listings clients are paging through.
+	maxCachedDirEntries = 1 << 17
+	maxNameBytes        = 255
+	maxLinkData         = 4096
+	maxCredBytes        = 400
+	maxAuthSysGids      = 16
+	maxFHBytes          = 128
 )

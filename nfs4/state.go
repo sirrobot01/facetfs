@@ -15,10 +15,11 @@ import (
 // Locking: an owner's mutex is taken before the store mutex, never the other
 // way round, and the store mutex is never held across a FileSystem call.
 type stateStore struct {
-	mu    sync.Mutex
-	now   func() time.Time
-	lease time.Duration
-	epoch [4]byte
+	mu        sync.Mutex
+	now       func() time.Time
+	lease     time.Duration
+	epoch     [4]byte
+	lastSweep time.Time
 
 	nextClient  uint64
 	nextOther   uint64

@@ -66,7 +66,7 @@ var opTable = [40]opFunc{
 // to e. It reports false when the top-level arguments did not decode, which
 // the RPC layer answers with GARBAGE_ARGS.
 func (s *Server) compound(ctx context.Context, cred *authSysCred, d *xdr.Decoder, e *xdr.Encoder) bool {
-	s.state.sweepExpired()
+	s.state.sweepDue()
 	tag := d.Opaque(maxTagBytes)
 	minor := d.Uint32()
 	numOps := d.Uint32()

@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/sirrobot01/facetfs"
 	"github.com/sirrobot01/facetfs/internal/xdr"
@@ -294,3 +295,27 @@ func BenchmarkGetattr500Clients(b *testing.B) { benchGetattrWithClients(b, 500) 
 func BenchmarkReaddirScale500(b *testing.B)  { benchReaddir(b, 500, 8<<10) }
 func BenchmarkReaddirScale2000(b *testing.B) { benchReaddir(b, 2000, 8<<10) }
 func BenchmarkReaddirScale4000(b *testing.B) { benchReaddir(b, 4000, 8<<10) }
+
+// benchSweep isolates the lease sweep from network noise.
+func benchSweep(b *testing.B, clients int, gated bool) {
+	store := newStateStore(90 * time.Second)
+	for i := range clients {
+		id, confirm, st := store.setClientID(fmt.Sprintf("sweep-%d", i), [8]byte{}, "none")
+		if st != nfs4OK || store.confirmClientID(id, confirm) != nfs4OK {
+			b.Fatal("could not register client")
+		}
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if gated {
+			store.sweepDue()
+		} else {
+			store.sweepExpired()
+		}
+	}
+}
+
+func BenchmarkSweepUngated100(b *testing.B)  { benchSweep(b, 100, false) }
+func BenchmarkSweepUngated1000(b *testing.B) { benchSweep(b, 1000, false) }
+func BenchmarkSweepGated100(b *testing.B)    { benchSweep(b, 100, true) }
+func BenchmarkSweepGated1000(b *testing.B)   { benchSweep(b, 1000, true) }

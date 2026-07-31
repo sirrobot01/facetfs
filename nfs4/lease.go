@@ -2,12 +2,26 @@ package nfs4
 
 import "time"
 
+// sweepDue runs a sweep only when one is not already recent. The request
+// path uses it so a server holding many clients does not scan them all on
+// every request; the ticker keeps sweeping while traffic is idle.
+func (st *stateStore) sweepDue() {
+	interval := st.lease / 2
+	st.mu.Lock()
+	recent := interval > 0 && !st.lastSweep.IsZero() && st.now().Sub(st.lastSweep) < interval
+	st.mu.Unlock()
+	if !recent {
+		st.sweepExpired()
+	}
+}
+
 // sweepExpired releases clients whose lease has elapsed. Expired stateids
 // remain tombstoned for one more lease interval so late operations receive
 // NFS4ERR_EXPIRED instead of being mistaken for unrelated unknown state.
 func (st *stateStore) sweepExpired() {
 	now := st.now()
 	st.mu.Lock()
+	st.lastSweep = now
 	for other, expiredAt := range st.expired {
 		if !now.Before(expiredAt.Add(st.lease)) {
 			delete(st.expired, other)
