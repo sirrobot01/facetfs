@@ -124,6 +124,13 @@ type Encoder struct {
 	b []byte
 }
 
+// NewEncoder returns an Encoder that appends into buf, discarding what it
+// holds but keeping its capacity, so a caller can reuse a buffer instead of
+// allocating one for every message.
+func NewEncoder(buf []byte) *Encoder {
+	return &Encoder{b: buf[:0]}
+}
+
 func (e *Encoder) Len() int      { return len(e.b) }
 func (e *Encoder) Bytes() []byte { return e.b }
 

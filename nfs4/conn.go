@@ -79,17 +79,18 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) error {
 
 	// One reader, per-request workers behind a semaphore, one writer.
 	// Replies may interleave in any order; the xid correlates them.
-	replies := make(chan []byte, maxInflight)
+	replies := make(chan *replyBuffer, maxInflight)
 	writerDone := make(chan struct{})
 	var writeErr error
 	go func() {
 		defer close(writerDone)
 		for reply := range replies {
 			if writeErr == nil {
-				if writeErr = writeRecord(c, reply); writeErr != nil {
+				if writeErr = writeRecord(c, reply.b); writeErr != nil {
 					c.Close()
 				}
 			}
+			releaseReply(reply)
 		}
 	}()
 
@@ -105,10 +106,12 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) error {
 		sem <- struct{}{}
 		workers.Go(func() {
 			defer func() { <-sem }()
-			if reply, ok := s.handleRecord(ctx, record); ok {
+			reply := acquireReply()
+			if s.handleRecord(ctx, record, reply) {
 				replies <- reply
 			} else {
 				// Too malformed to answer; the reader unblocks with an error.
+				releaseReply(reply)
 				c.Close()
 			}
 		})
@@ -129,25 +132,28 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) error {
 	}
 }
 
-// handleRecord parses one RPC call and returns the encoded reply. ok=false
-// tears down the connection: the header was too malformed to answer.
-func (s *Server) handleRecord(ctx context.Context, record []byte) (reply []byte, ok bool) {
+// handleRecord parses one RPC call and encodes the reply into buffer. It
+// reports false when the header was too malformed to answer, which tears the
+// connection down.
+func (s *Server) handleRecord(ctx context.Context, record []byte, buffer *replyBuffer) bool {
+	e := xdr.NewEncoder(buffer.b)
+	defer func() { buffer.b = e.Bytes() }()
+
 	d := xdr.NewDecoder(record)
 	xid := d.Uint32()
 	mtype := d.Uint32()
 	rpcvers := d.Uint32()
 	if d.Err() != nil || mtype != msgCall {
-		return nil, false
+		return false
 	}
 	if rpcvers != rpcVersion {
-		var e xdr.Encoder
 		e.Uint32(xid)
 		e.Uint32(msgReply)
 		e.Uint32(replyDenied)
 		e.Uint32(rejectRPCMismatch)
 		e.Uint32(rpcVersion)
 		e.Uint32(rpcVersion)
-		return e.Bytes(), true
+		return true
 	}
 	prog := d.Uint32()
 	vers := d.Uint32()
@@ -158,10 +164,11 @@ func (s *Server) handleRecord(ctx context.Context, record []byte) (reply []byte,
 	verfFlavor := d.Uint32()
 	d.Opaque(maxCredBytes)
 	if d.Err() != nil {
-		return nil, false
+		return false
 	}
 	if verfFlavor != authNone {
-		return authError(xid, authBadVerf), true
+		authError(e, xid, authBadVerf)
+		return true
 	}
 	var cred *authSysCred
 	switch credFlavor {
@@ -169,35 +176,40 @@ func (s *Server) handleRecord(ctx context.Context, record []byte) (reply []byte,
 	case authSys:
 		var err error
 		if cred, err = parseAuthSys(credBody); err != nil {
-			return authError(xid, authBadCred), true
+			authError(e, xid, authBadCred)
+			return true
 		}
 	default:
-		return authError(xid, authBadCred), true
+		authError(e, xid, authBadCred)
+		return true
 	}
 
 	switch {
 	case prog != nfsProgram:
-		return accepted(xid, acceptProgUnavail, nil), true
+		acceptedHeader(e, xid, acceptProgUnavail)
+		return true
 	case vers != nfsVersion:
-		var e xdr.Encoder
+		acceptedHeader(e, xid, acceptProgMismatch)
 		e.Uint32(nfsVersion)
 		e.Uint32(nfsVersion)
-		return accepted(xid, acceptProgMismatch, e.Bytes()), true
+		return true
 	}
 	switch proc {
 	case procNull:
-		return accepted(xid, acceptSuccess, nil), true
+		acceptedHeader(e, xid, acceptSuccess)
+		return true
 	case procCompound:
 		// The compound encodes into the reply buffer directly. Assembling it
 		// separately would copy every READ payload twice more.
-		var e xdr.Encoder
-		acceptedHeader(&e, xid, acceptSuccess)
-		if !s.compound(ctx, cred, d, &e) {
-			return accepted(xid, acceptGarbageArgs, nil), true
+		acceptedHeader(e, xid, acceptSuccess)
+		if !s.compound(ctx, cred, d, e) {
+			e.Truncate(0)
+			acceptedHeader(e, xid, acceptGarbageArgs)
 		}
-		return e.Bytes(), true
+		return true
 	default:
-		return accepted(xid, acceptProcUnavail, nil), true
+		acceptedHeader(e, xid, acceptProcUnavail)
+		return true
 	}
 }
 
@@ -229,19 +241,35 @@ func acceptedHeader(e *xdr.Encoder, xid uint32, stat uint32) {
 	e.Uint32(stat)
 }
 
-func accepted(xid uint32, stat uint32, body []byte) []byte {
-	var e xdr.Encoder
-	acceptedHeader(&e, xid, stat)
-	e.OpaqueFixed(body)
-	return e.Bytes()
-}
-
-func authError(xid uint32, stat uint32) []byte {
-	var e xdr.Encoder
+func authError(e *xdr.Encoder, xid uint32, stat uint32) {
 	e.Uint32(xid)
 	e.Uint32(msgReply)
 	e.Uint32(replyDenied)
 	e.Uint32(rejectAuthError)
 	e.Uint32(stat)
-	return e.Bytes()
+}
+
+// replyBuffer carries one encoded reply from the goroutine that built it to
+// the one that writes it, and is then reused.
+type replyBuffer struct{ b []byte }
+
+// keepReplyBytes retains a buffer big enough for a READ at the default
+// transfer size, which is what makes large reads cheap to repeat, and drops
+// anything the pool has grown far past it. The pool is emptied by every
+// garbage collection, so what it holds is bounded by what is in flight rather
+// than by the number of connections.
+const keepReplyBytes = 2 << 20
+
+var replyPool = sync.Pool{New: func() any { return &replyBuffer{b: make([]byte, 0, 8<<10)} }}
+
+func acquireReply() *replyBuffer {
+	buffer := replyPool.Get().(*replyBuffer)
+	buffer.b = buffer.b[:0]
+	return buffer
+}
+
+func releaseReply(buffer *replyBuffer) {
+	if cap(buffer.b) <= keepReplyBytes {
+		replyPool.Put(buffer)
+	}
 }
