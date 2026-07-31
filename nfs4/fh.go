@@ -7,8 +7,11 @@ import (
 )
 
 // Filehandles are HMAC-sealed cleaned paths, advertised as volatile
-// (FH4_VOLATILE_ANY): rename, restart, and long-handle eviction all
-// invalidate them, and clients see NFS4ERR_FHEXPIRED or NFS4ERR_STALE.
+// (FH4_VOLATILE_ANY): clients see NFS4ERR_FHEXPIRED or NFS4ERR_STALE when one
+// stops resolving. Rename always invalidates a handle. Restart invalidates
+// handles only under a per-Server random key; a fixed Server.HandleKey keeps
+// short handles valid. Long handles also depend on the sha→path table below,
+// so eviction and restart expire them unless a resolver re-derives the path.
 //
 // Short form, paths up to shortPathMax bytes: 0x01 ‖ mac[16] ‖ path.
 // Long form: 0x02 ‖ mac[16] ‖ sha256(path); the sha→path mapping is kept in a
@@ -24,15 +27,30 @@ const (
 )
 
 type fhCodec struct {
-	key []byte
+	key     []byte
+	resolve func(sum [32]byte) (string, bool)
 
 	mu    sync.Mutex
 	long  map[[32]byte]string
 	order [][32]byte // FIFO eviction; oldest first
 }
 
-func newFHCodec(key []byte) *fhCodec {
-	return &fhCodec{key: key, long: map[[32]byte]string{}}
+func newFHCodec(key []byte, resolve func(sum [32]byte) (string, bool)) *fhCodec {
+	return &fhCodec{key: key, resolve: resolve, long: map[[32]byte]string{}}
+}
+
+func (c *fhCodec) remember(sum [32]byte, path string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.long[sum]; ok {
+		return
+	}
+	if len(c.order) >= longTableMax {
+		delete(c.long, c.order[0])
+		c.order = c.order[1:]
+	}
+	c.long[sum] = path
+	c.order = append(c.order, sum)
 }
 
 func (c *fhCodec) mac(form byte, payload []byte) []byte {
@@ -50,16 +68,7 @@ func (c *fhCodec) seal(path string) []byte {
 		return append(fh, path...)
 	}
 	sum := sha256.Sum256([]byte(path))
-	c.mu.Lock()
-	if _, ok := c.long[sum]; !ok {
-		if len(c.order) >= longTableMax {
-			delete(c.long, c.order[0])
-			c.order = c.order[1:]
-		}
-		c.long[sum] = path
-		c.order = append(c.order, sum)
-	}
-	c.mu.Unlock()
+	c.remember(sum, path)
 	fh := make([]byte, 0, 1+fhMacLen+len(sum))
 	fh = append(fh, fhLong)
 	fh = append(fh, c.mac(fhLong, sum[:])...)
@@ -81,9 +90,16 @@ func (c *fhCodec) unseal(fh []byte) (string, nfsStat) {
 		if len(payload) != sha256.Size || !hmac.Equal(mac, c.mac(fhLong, payload)) {
 			return "", nfs4ErrFHExpired
 		}
+		sum := [32]byte(payload)
 		c.mu.Lock()
-		path, ok := c.long[[32]byte(payload)]
+		path, ok := c.long[sum]
 		c.mu.Unlock()
+		if !ok && c.resolve != nil {
+			if p, found := c.resolve(sum); found && sha256.Sum256([]byte(p)) == sum {
+				c.remember(sum, p)
+				path, ok = p, true
+			}
+		}
 		if !ok {
 			return "", nfs4ErrFHExpired
 		}

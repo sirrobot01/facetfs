@@ -88,16 +88,20 @@ type messageWindow struct {
 	used [maxCredits * 2]bool
 }
 
-func (w *messageWindow) take(id uint64) bool {
+func (w *messageWindow) take(id uint64, charge int) bool {
 	span := uint64(len(w.used))
-	if id < w.base || id >= w.base+span {
+	if charge < 1 || uint64(charge) > span || id < w.base ||
+		id-w.base > span-uint64(charge) || uint64(charge-1) > ^uint64(0)-id {
 		return false
 	}
-	slot := int(id % span)
-	if w.used[slot] {
-		return false
+	for i := range charge {
+		if w.used[int((id+uint64(i))%span)] {
+			return false
+		}
 	}
-	w.used[slot] = true
+	for i := range charge {
+		w.used[int((id+uint64(i))%span)] = true
+	}
 	// Forget the ids below the lowest one still outstanding. A replay of one
 	// of those is refused by the base comparison instead.
 	for w.used[int(w.base%span)] {
@@ -262,22 +266,30 @@ func (conn *connection) handleFrame(ctx context.Context, frame []byte) ([]byte, 
 		}
 
 		sess := conn.s.state.session(m.hdr.sessionID, conn)
-		var authenticated, shouldSign bool
+		var authenticated, signRequired bool
 		var signingKey []byte
 		if sess != nil {
 			sess.mu.Lock()
-			authenticated, shouldSign = sess.authenticated, sess.sign
+			authenticated, signRequired = sess.authenticated, sess.sign
 			signingKey = append([]byte(nil), sess.signingKey...)
 			sess.mu.Unlock()
 		}
+		// A signed request is verified whether or not the session demands
+		// signing. An unsigned one is refused only when it does: a client
+		// that merely reports it can sign need not sign every message
+		// ([MS-SMB2] section 3.3.5.2.4).
+		signedRequest := hdr.flags&flagSigned != 0
 		var body []byte
 		var status uint32
 		switch {
 		case sigFailed:
 			status = statusAccessDenied
-		case authenticated && shouldSign && !verifyMessage(signingKey, conn.signAlg, m.raw):
+		case authenticated && signedRequest && !verifyMessage(signingKey, conn.signAlg, m.raw):
+			// A wrong signature is tampering, not a policy failure.
 			sigFailed = true
 			closeAfter = true
+			status = statusAccessDenied
+		case authenticated && signRequired && !signedRequest:
 			status = statusAccessDenied
 		case relatedFailed:
 			status = relatedStatus
@@ -309,9 +321,10 @@ func (conn *connection) handleFrame(ctx context.Context, frame []byte) ([]byte, 
 	if len(reply) == 0 {
 		return nil, true, closeAfter
 	}
-	// Each response of a signing session is signed on its own, with the key
-	// of the session it answers; the messages of one chain can belong to
-	// different sessions.
+	// Each response is signed on its own, with the key of the session it
+	// answers; the messages of one chain can belong to different sessions. A
+	// response is signed when the session demands signing or when the request
+	// was signed ([MS-SMB2] section 3.3.4.1.1).
 	for i, a := range answers {
 		end := len(reply)
 		if i+1 < len(answers) {
@@ -322,7 +335,7 @@ func (conn *connection) handleFrame(ctx context.Context, frame []byte) ([]byte, 
 			continue
 		}
 		s.mu.Lock()
-		sign := s.authenticated && s.sign
+		sign := s.authenticated && (s.sign || a.m.hdr.flags&flagSigned != 0)
 		key := append([]byte(nil), s.signingKey...)
 		s.mu.Unlock()
 		if sign && !signMessage(key, conn.signAlg, reply[a.start:end]) {
@@ -371,10 +384,13 @@ func (conn *connection) admit(m *message) bool {
 	}
 	conn.mu.Lock()
 	defer conn.mu.Unlock()
-	if !conn.window.take(m.hdr.messageID) {
+	if charge > conn.credits {
 		return false
 	}
-	if charge > conn.credits {
+	// CreditCharge reserves that many consecutive message ids, not only the
+	// id carried in the header. Large I/O therefore advances the next valid
+	// id by its full charge ([MS-SMB2] section 3.3.5.2.3).
+	if !conn.window.take(m.hdr.messageID, charge) {
 		return false
 	}
 	conn.credits -= charge

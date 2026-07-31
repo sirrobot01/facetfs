@@ -490,31 +490,50 @@ func TestServerRequiresFileSystemAndAuthenticator(t *testing.T) {
 
 func TestMessageWindowRefusesReplayAndDistantIDs(t *testing.T) {
 	var w messageWindow
-	if !w.take(0) || !w.take(1) {
+	if !w.take(0, 1) || !w.take(1, 1) {
 		t.Fatal("the first ids were refused")
 	}
-	if w.take(0) {
+	if w.take(0, 1) {
 		t.Fatal("a replayed id was accepted")
 	}
-	if !w.take(5) {
+	if !w.take(5, 1) {
 		t.Fatal("an id inside the window was refused")
 	}
-	if w.take(5) {
+	if w.take(5, 1) {
 		t.Fatal("a replayed out-of-order id was accepted")
 	}
-	if w.take(uint64(len(w.used)) + 10) {
+	if w.take(uint64(len(w.used))+10, 1) {
 		t.Fatal("an id beyond the window was accepted")
 	}
 	// Filling the gap advances the window past everything consumed.
 	for id := uint64(2); id <= 4; id++ {
-		if !w.take(id) {
+		if !w.take(id, 1) {
 			t.Fatalf("id %d was refused", id)
 		}
 	}
 	if w.base != 6 {
 		t.Fatalf("window base = %d, want 6", w.base)
 	}
-	if w.take(3) {
+	if w.take(3, 1) {
 		t.Fatal("an id below the window base was accepted")
+	}
+}
+
+func TestMessageWindowConsumesEveryChargedID(t *testing.T) {
+	var w messageWindow
+	if !w.take(0, 128) {
+		t.Fatal("a valid multi-credit range was refused")
+	}
+	if w.base != 128 {
+		t.Fatalf("window base = %d, want 128", w.base)
+	}
+	if w.take(64, 1) {
+		t.Fatal("an id consumed by a multi-credit request was accepted")
+	}
+	if !w.take(128, maxCredits) {
+		t.Fatal("a maximum-charge range was refused")
+	}
+	if w.take(128+maxCredits, len(w.used)+1) {
+		t.Fatal("a charge larger than the window was accepted")
 	}
 }

@@ -60,6 +60,11 @@ func exportedSessionKey(sessionBase, encrypted []byte, flags uint32) ([]byte, bo
 }
 
 // smbKDF is SP 800-108 counter mode with HMAC-SHA256 and a 128-bit output.
+//
+// label is the null-terminated string [MS-SMB2] section 3.1.4.2 names, and
+// the KDF writes the 0x00 separator SP 800-108 places between the label and
+// the context. The derivation therefore carries two null bytes, not one; see
+// TestSigningKeyKnownAnswer.
 func smbKDF(key []byte, label string, context []byte) []byte {
 	h := hmac.New(sha256.New, key)
 	var counter [4]byte

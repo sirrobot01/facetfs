@@ -34,6 +34,12 @@ type Server struct {
 	// HandleKey seals filehandles. Zero means a random key per Server, so
 	// clients must remount after a restart.
 	HandleKey []byte
+	// ResolveLongHandle maps the SHA-256 of a served path back to the path,
+	// for filehandles whose path is too long to embed in the handle itself.
+	// Such paths live in a bounded in-memory table, so without a resolver
+	// their handles expire on restart or table eviction. A result that does
+	// not hash to sum is ignored. Optional.
+	ResolveLongHandle func(sum [32]byte) (path string, ok bool)
 	// LeaseDuration is the client lease. Zero means 90 seconds.
 	LeaseDuration time.Duration
 	// MaxReadBytes and MaxWriteBytes cap one READ or WRITE and are
@@ -79,7 +85,7 @@ func (s *Server) init() error {
 				return
 			}
 		}
-		s.fh = newFHCodec(key)
+		s.fh = newFHCodec(key, s.ResolveLongHandle)
 		s.supported = s.supportedAttrs()
 		s.state = newStateStore(s.lease())
 		s.dirs = newDirCache(s.state.now, s.lease(), maxCachedDirEntries)

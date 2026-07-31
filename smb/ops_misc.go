@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"hash/fnv"
 	"io"
 	"io/fs"
 	"math"
+	"path"
 	"strings"
 	"time"
 
@@ -72,6 +74,16 @@ func putTimes(b []byte, info fs.FileInfo) {
 	}
 }
 
+// fileIndex is the stable identifier exposed in file information and
+// directory entries. It is separate from the per-open FileId used to address
+// a handle on the wire: a client may compare this value before and after it
+// opens a path and treats a mismatch as a stale file handle.
+func fileIndex(name string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(name))
+	return h.Sum64()
+}
+
 func fileInfo(class byte, h *openHandle, info fs.FileInfo, pathName string, pendingDelete bool) ([]byte, uint32) {
 	name := utf16Bytes(strings.ReplaceAll(pathName, "/", "\\"))
 	switch class {
@@ -95,7 +107,9 @@ func fileInfo(class byte, h *openHandle, info fs.FileInfo, pathName string, pend
 		}
 		return b, statusSuccess
 	case 6: // FileInternalInformation
-		return append([]byte(nil), h.id[:8]...), statusSuccess
+		b := make([]byte, 8)
+		binary.LittleEndian.PutUint64(b, fileIndex(pathName))
+		return b, statusSuccess
 	case 7: // FileEaInformation
 		return make([]byte, 4), statusSuccess
 	case 8: // FileAccessInformation
@@ -129,7 +143,7 @@ func fileInfo(class byte, h *openHandle, info fs.FileInfo, pathName string, pend
 		if info.IsDir() {
 			b[61] = 1
 		}
-		binary.LittleEndian.PutUint64(b[64:], binary.LittleEndian.Uint64(h.id[:8]))
+		binary.LittleEndian.PutUint64(b[64:], fileIndex(pathName))
 		binary.LittleEndian.PutUint32(b[76:], h.access)
 		binary.LittleEndian.PutUint32(b[88:], h.options)
 		binary.LittleEndian.PutUint32(b[96:], uint32(len(name)))
@@ -455,13 +469,13 @@ func (conn *connection) queryDirectory(ctx context.Context, m *message) ([]byte,
 	snap := h.session.snapshots[h.id]
 	restart := flags&(0x01|0x10) != 0 || snap == nil || !strings.EqualFold(snap.pattern, pattern)
 	conn.s.state.mu.Unlock()
+	directory, _ := conn.s.state.handleMeta(h)
 	if restart {
 		maxEntries := conn.s.MaxDirectoryEntries
 		if maxEntries <= 0 {
 			maxEntries = defaultDirEntries
 		}
-		pathName, _ := conn.s.state.handleMeta(h)
-		f, err := conn.s.FileSystem.OpenFile(ctx, pathName, 0, 0)
+		f, err := conn.s.FileSystem.OpenFile(ctx, directory, 0, 0)
 		if err != nil {
 			return nil, fsStatus(err)
 		}
@@ -507,7 +521,8 @@ func (conn *connection) queryDirectory(ctx context.Context, m *message) ([]byte,
 	wasStarted := snap.started
 	prevStart := -1
 	for snap.index < len(snap.entries) {
-		entry := encodeDirectoryEntry(class, uint32(snap.index), snap.entries[snap.index])
+		info := snap.entries[snap.index]
+		entry := encodeDirectoryEntry(class, uint32(snap.index), info, fileIndex(path.Join(directory, info.Name())))
 		pad := align8(len(entry))
 		if len(out)+pad > int(maxOut) {
 			break
@@ -540,7 +555,7 @@ func (conn *connection) queryDirectory(ctx context.Context, m *message) ([]byte,
 	return append(b, out...), statusSuccess
 }
 
-func encodeDirectoryEntry(class byte, index uint32, info fs.FileInfo) []byte {
+func encodeDirectoryEntry(class byte, index uint32, info fs.FileInfo, id uint64) []byte {
 	name := utf16Bytes(info.Name())
 	var fixed int
 	switch class {
@@ -574,10 +589,10 @@ func encodeDirectoryEntry(class byte, index uint32, info fs.FileInfo) []byte {
 	binary.LittleEndian.PutUint32(b[56:], fileAttributes(info))
 	binary.LittleEndian.PutUint32(b[60:], uint32(len(name)))
 	if class == 37 {
-		binary.LittleEndian.PutUint64(b[94:], uint64(index+1))
+		binary.LittleEndian.PutUint64(b[94:], id)
 	}
 	if class == 38 {
-		binary.LittleEndian.PutUint64(b[72:], uint64(index+1))
+		binary.LittleEndian.PutUint64(b[72:], id)
 	}
 	return append(b, name...)
 }

@@ -36,6 +36,24 @@ func TestAESCMACKnownAnswers(t *testing.T) {
 	}
 }
 
+// TestSigningKeyKnownAnswer pins the 3.1.1 signing key against a real
+// client. The values come from one session of the Python smbprotocol client;
+// the resulting derivation is also accepted by the Linux cifs client.
+//
+// A round-trip test cannot catch an error here, because both sides of it
+// share the derivation. The label carries a terminating null and the KDF adds
+// the SP 800-108 separator, so the derivation covers two null bytes; with one
+// the server signs consistently and no real client accepts it.
+func TestSigningKeyKnownAnswer(t *testing.T) {
+	sessionKey := mustHex(t, "0115978ef7985dbaaa45f0b903668122")
+	preauth := mustHex(t, "9eb9e35875a8d1cc7b23476d687d11d5f5c64926a21046db3117265d8c94ab0d"+
+		"5221313a26bc48ee901dde7783814e3e03fb62273df9012f0c979614dee2ce1d")
+	want := "afd6e5fe5ed80b3fbbc46eae6cdc7402"
+	if got := hex.EncodeToString(smbKDF(sessionKey, signingKeyLabel, preauth)); got != want {
+		t.Fatalf("signing key = %s, want %s", got, want)
+	}
+}
+
 func TestMessageSignatureRoundTripAndTamper(t *testing.T) {
 	msg := append(header{command: cmdEcho, messageID: 7}.encode(), echoRequest()...)
 	key := []byte("0123456789abcdef")

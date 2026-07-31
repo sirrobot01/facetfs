@@ -90,6 +90,10 @@ const (
 	contextSigning          = 0x0008
 )
 
+// signingKeyLabel is the 3.1.1 key-derivation label. The terminating null is
+// part of the label ([MS-SMB2] section 3.1.4.2).
+const signingKeyLabel = "SMBSigningKey\x00"
+
 // Hash and signing algorithm identifiers.
 const (
 	hashSHA512 = 0x0001

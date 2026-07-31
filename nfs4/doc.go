@@ -4,9 +4,11 @@
 //
 // Byte-range locks are advisory: they coordinate cooperating NFS clients but
 // do not prevent direct filesystem access or I/O through another protocol.
-// Filehandles and protocol state are volatile across server restarts. AUTH_SYS
-// credentials must therefore be used only on a trusted transport or behind an
-// authentication boundary supplied by the caller.
+// Protocol state is volatile across server restarts, and so are filehandles
+// unless a fixed Server.HandleKey is supplied (with Server.ResolveLongHandle
+// covering paths too long to embed in a handle). AUTH_SYS credentials must be
+// used only on a trusted transport or behind an authentication boundary
+// supplied by the caller.
 //
 // Read delegations (Server.ReadDelegations) are off by default. A delegation
 // promises a client that the file will not change without a recall first, and

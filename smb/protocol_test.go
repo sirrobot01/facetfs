@@ -37,6 +37,12 @@ func sessionSetupRequest(token []byte) []byte {
 	return append(b, token...)
 }
 
+func signedSessionSetupRequest(token []byte) []byte {
+	b := sessionSetupRequest(token)
+	b[3] = signingRequired
+	return b
+}
+
 func type3Message(t testing.TB, domain, user string, ntHash []byte, challenge [8]byte) ([]byte, []byte) {
 	t.Helper()
 	blob := make([]byte, 28)
@@ -91,7 +97,7 @@ func auth210(tc *testClient, hash []byte) *authClient {
 	if h, _ := tc.negotiate([]uint16{dialect210}, false); h.status != statusSuccess {
 		t.Fatalf("NEGOTIATE = %#x", h.status)
 	}
-	tc.send(tc.request(cmdSessionSetup, sessionSetupRequest(type1Message())))
+	tc.send(tc.request(cmdSessionSetup, signedSessionSetupRequest(type1Message())))
 	h, body := tc.recv()
 	if h.status != statusMoreProcessingRequired || h.sessionID == 0 {
 		t.Fatalf("first SESSION_SETUP = %#x, session %#x", h.status, h.sessionID)
@@ -103,7 +109,7 @@ func auth210(tc *testClient, hash []byte) *authClient {
 	var challenge [8]byte
 	copy(challenge[:], token[24:32])
 	type3, key := type3Message(t, "DOMAIN", "alice", hash, challenge)
-	req := tc.request(cmdSessionSetup, sessionSetupRequest(type3))
+	req := tc.request(cmdSessionSetup, signedSessionSetupRequest(type3))
 	binary.LittleEndian.PutUint64(req[40:], h.sessionID)
 	tc.send(req)
 	frame, err := readFrame(tc.c, 1<<20)
@@ -182,7 +188,7 @@ func auth311(tc *testClient, hash []byte) *authClient {
 	preauth = advancePreauth(preauth, request)
 	preauth = advancePreauth(preauth, response)
 
-	first := tc.request(cmdSessionSetup, sessionSetupRequest(type1Message()))
+	first := tc.request(cmdSessionSetup, signedSessionSetupRequest(type1Message()))
 	tc.send(first)
 	challengeResponse, err := readFrame(tc.c, 1<<20)
 	if err != nil {
@@ -201,10 +207,10 @@ func auth311(tc *testClient, hash []byte) *authClient {
 	var challenge [8]byte
 	copy(challenge[:], token[24:32])
 	type3, sessionKey := type3Message(t, "DOMAIN", "alice", hash, challenge)
-	finalRequest := tc.request(cmdSessionSetup, sessionSetupRequest(type3))
+	finalRequest := tc.request(cmdSessionSetup, signedSessionSetupRequest(type3))
 	binary.LittleEndian.PutUint64(finalRequest[40:], h.sessionID)
 	preauth = advancePreauth(preauth, finalRequest)
-	key := smbKDF(sessionKey, "SMBSigningKey", preauth[:])
+	key := smbKDF(sessionKey, signingKeyLabel, preauth[:])
 	tc.send(finalRequest)
 	finalResponse, err := readFrame(tc.c, 1<<20)
 	if err != nil {
@@ -217,6 +223,116 @@ func auth311(tc *testClient, hash []byte) *authClient {
 	ac := &authClient{testClient: tc, session: h.sessionID, key: key, alg: signAESCMAC}
 	ac.connectTree()
 	return ac
+}
+
+// securityToken pulls the security buffer out of a SESSION_SETUP response
+// body.
+func securityToken(t testing.TB, body []byte) []byte {
+	t.Helper()
+	if len(body) < 8 {
+		t.Fatalf("SESSION_SETUP body = %x", body)
+	}
+	off := int(binary.LittleEndian.Uint16(body[4:])) - headerSize
+	n := int(binary.LittleEndian.Uint16(body[6:]))
+	if off < 0 || off+n > len(body) {
+		t.Fatalf("security buffer %d+%d outside body of %d", off, n, len(body))
+	}
+	return body[off : off+n]
+}
+
+func TestChallengeFramingMirrorsTheClient(t *testing.T) {
+	// The Linux kernel client sends NTLM without a SPNEGO wrapper and
+	// rejects a wrapped challenge; a SPNEGO client expects the wrapper back.
+	t.Run("raw", func(t *testing.T) {
+		tc := newTestClientFor(t, &Server{FileSystem: facetfs.NewMemFS(), Authenticator: stubAuth{}})
+		tc.negotiate([]uint16{dialect210}, false)
+		tc.send(tc.request(cmdSessionSetup, sessionSetupRequest(type1Message())))
+		h, body := tc.recv()
+		if h.status != statusMoreProcessingRequired {
+			t.Fatalf("SESSION_SETUP = %#x", h.status)
+		}
+		if token := securityToken(t, body); !bytes.HasPrefix(token, ntlmSignature) {
+			t.Fatalf("challenge to a raw NTLM client = %x, want a raw NTLM token", token[:min(len(token), 12)])
+		}
+	})
+	t.Run("spnego", func(t *testing.T) {
+		tc := newTestClientFor(t, &Server{FileSystem: facetfs.NewMemFS(), Authenticator: stubAuth{}})
+		tc.negotiate([]uint16{dialect210}, false)
+		// Any blob that does not start with the NTLM signature is wrapped.
+		wrapped := append([]byte{0x60, 0x00}, type1Message()...)
+		tc.send(tc.request(cmdSessionSetup, sessionSetupRequest(wrapped)))
+		h, body := tc.recv()
+		if h.status != statusMoreProcessingRequired {
+			t.Fatalf("SESSION_SETUP = %#x", h.status)
+		}
+		if token := securityToken(t, body); len(token) == 0 || token[0] != 0xa1 {
+			t.Fatalf("challenge to a SPNEGO client = %x, want a NegTokenTarg", token[:min(len(token), 12)])
+		}
+	})
+}
+
+func TestSigningEnabledDoesNotRequireEveryRequest(t *testing.T) {
+	hash := NTHash("correct horse battery staple")
+	tc := newTestClientFor(t, &Server{
+		FileSystem:    facetfs.NewMemFS(),
+		Authenticator: passwordAuth{hashes: map[string][]byte{"DOMAIN\\alice": hash}},
+	})
+	if h, _ := tc.negotiate([]uint16{dialect210}, false); h.status != statusSuccess {
+		t.Fatalf("NEGOTIATE = %#x", h.status)
+	}
+	tc.send(tc.request(cmdSessionSetup, sessionSetupRequest(type1Message())))
+	h, body := tc.recv()
+	if h.status != statusMoreProcessingRequired || h.sessionID == 0 {
+		t.Fatalf("first SESSION_SETUP = %#x, session %#x", h.status, h.sessionID)
+	}
+	token, ok := ntlmToken(body)
+	if !ok || len(token) < 32 {
+		t.Fatalf("challenge token = %x", body)
+	}
+	var challenge [8]byte
+	copy(challenge[:], token[24:32])
+	type3, key := type3Message(t, "DOMAIN", "alice", hash, challenge)
+	req := tc.request(cmdSessionSetup, sessionSetupRequest(type3))
+	binary.LittleEndian.PutUint64(req[40:], h.sessionID)
+	tc.send(req)
+	frame, err := readFrame(tc.c, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	final, ok := decodeHeader(frame)
+	if !ok || final.status != statusSuccess || final.flags&flagSigned != 0 {
+		t.Fatalf("final SESSION_SETUP = %+v, want an unsigned success", final)
+	}
+
+	// An optional-signing session accepts an unsigned request and mirrors a
+	// client's decision to sign: only the response to the signed request is
+	// signed.
+	echo := tc.request(cmdEcho, echoRequest())
+	binary.LittleEndian.PutUint64(echo[40:], h.sessionID)
+	tc.send(echo)
+	unsigned, err := readFrame(tc.c, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uh, ok := decodeHeader(unsigned)
+	if !ok || uh.status != statusSuccess || uh.flags&flagSigned != 0 {
+		t.Fatalf("unsigned ECHO response = %+v", uh)
+	}
+
+	echo = tc.request(cmdEcho, echoRequest())
+	binary.LittleEndian.PutUint64(echo[40:], h.sessionID)
+	if !signMessage(key, signHMACSHA256, echo) {
+		t.Fatal("sign ECHO")
+	}
+	tc.send(echo)
+	signed, err := readFrame(tc.c, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sh, ok := decodeHeader(signed)
+	if !ok || sh.status != statusSuccess || !verifyMessage(key, signHMACSHA256, signed) {
+		t.Fatalf("signed ECHO response = %+v, signature valid %v", sh, verifyMessage(key, signHMACSHA256, signed))
+	}
 }
 
 func TestSMB311PreauthAndCMACSession(t *testing.T) {
@@ -273,7 +389,11 @@ func TestBadSessionSignatureIsDeniedAndClosed(t *testing.T) {
 	req := ac.request(cmdEcho, echoRequest())
 	binary.LittleEndian.PutUint32(req[36:], ac.tree)
 	binary.LittleEndian.PutUint64(req[40:], ac.session)
-	ac.send(req) // deliberately unsigned
+	if !signMessage(ac.key, ac.alg, req) {
+		t.Fatal("sign request")
+	}
+	req[48] ^= 1 // corrupt the signature without making it unsigned
+	ac.send(req)
 	frame, err := readFrame(ac.c, 1<<20)
 	if err != nil {
 		t.Fatal(err)
@@ -453,6 +573,25 @@ func TestSMBPathValidation(t *testing.T) {
 	}
 	if got, err := smbPath(utf16Bytes("dir\\file.txt")); err != nil || got != "/dir/file.txt" {
 		t.Fatalf("valid path = %q, %v", got, err)
+	}
+}
+
+func TestFileIndexMatchesDirectoryAndFileInformation(t *testing.T) {
+	info := syntheticInfo{n: "greeting.txt"}
+	internal, status := fileInfo(6, &openHandle{}, info, "/greeting.txt", false)
+	if status != statusSuccess || len(internal) != 8 {
+		t.Fatalf("FileInternalInformation = %x, status %#x", internal, status)
+	}
+	want := binary.LittleEndian.Uint64(internal)
+	for _, class := range []byte{37, 38} {
+		entry := encodeDirectoryEntry(class, 0, info, fileIndex("/greeting.txt"))
+		off := 94
+		if class == 38 {
+			off = 72
+		}
+		if got := binary.LittleEndian.Uint64(entry[off:]); got != want {
+			t.Errorf("directory class %d file id = %#x, FileInternalInformation = %#x", class, got, want)
+		}
 	}
 }
 

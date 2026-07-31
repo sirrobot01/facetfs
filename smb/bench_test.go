@@ -57,6 +57,9 @@ func (ac *authClient) exchangeCharged(command, charge uint16, body []byte) (head
 	ac.t.Helper()
 	req := ac.request(command, body)
 	binary.LittleEndian.PutUint16(req[6:], charge)
+	if charge > 1 {
+		ac.id += uint64(charge - 1)
+	}
 	binary.LittleEndian.PutUint32(req[36:], ac.tree)
 	binary.LittleEndian.PutUint64(req[40:], ac.session)
 	if !signMessage(ac.key, ac.alg, req) {

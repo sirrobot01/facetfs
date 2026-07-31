@@ -1,6 +1,7 @@
 package smb
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha512"
 	"encoding/binary"
@@ -28,6 +29,10 @@ func (conn *connection) sessionSetup(ctx context.Context, m *message) ([]byte, u
 	if !ok {
 		return nil, statusLogonFailure
 	}
+	// The response mirrors the client's framing. The Linux kernel client
+	// sends NTLM without a SPNEGO wrapper and rejects a wrapped challenge;
+	// Windows and macOS send SPNEGO and expect it back.
+	raw := bytes.HasPrefix(blob, ntlmSignature)
 	typ, ok := ntlmType(token)
 	if !ok {
 		return nil, statusLogonFailure
@@ -49,7 +54,10 @@ func (conn *connection) sessionSetup(ctx context.Context, m *message) ([]byte, u
 		conn.mu.Lock()
 		sess.mu.Lock()
 		sess.preauth = conn.preauth
-		sess.sign = conn.s.RequireSigning || m.body[3]&(signingEnabled|signingRequired) != 0
+		// Session.SigningRequired: the server demands signing, or the client
+		// does ([MS-SMB2] section 3.3.5.5.3). A client that only reports it
+		// can sign is not held to signing every message.
+		sess.sign = conn.s.RequireSigning || m.body[3]&signingRequired != 0
 		sess.mu.Unlock()
 		conn.mu.Unlock()
 		if conn.s.RequireSigning && m.body[3]&(signingEnabled|signingRequired) == 0 {
@@ -63,6 +71,9 @@ func (conn *connection) sessionSetup(ctx context.Context, m *message) ([]byte, u
 		sess.ntlmFlags = flags
 		sess.mu.Unlock()
 		m.hdr.sessionID = sess.id
+		if raw {
+			return sessionSetupResponse(challengeToken), statusMoreProcessingRequired
+		}
 		return sessionSetupResponse(spnegoChallenge(challengeToken)), statusMoreProcessingRequired
 	case 3:
 		sess := conn.s.state.session(m.hdr.sessionID, conn)
@@ -87,13 +98,16 @@ func (conn *connection) sessionSetup(ctx context.Context, m *message) ([]byte, u
 		sess.mu.Lock()
 		sess.user = result.domain + "\\" + result.user
 		if conn.dialect == dialect311 {
-			sess.signingKey = smbKDF(result.key, "SMBSigningKey", preauth[:])
+			sess.signingKey = smbKDF(result.key, signingKeyLabel, preauth[:])
 		} else {
 			sess.signingKey = append([]byte(nil), result.key...)
 		}
 		sess.authenticated = true
 		sess.authenticating = false
 		sess.mu.Unlock()
+		if raw {
+			return sessionSetupResponse(nil), statusSuccess
+		}
 		return sessionSetupResponse(spnegoComplete()), statusSuccess
 	default:
 		return nil, statusLogonFailure
