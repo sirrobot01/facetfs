@@ -111,6 +111,23 @@ func FuzzParseUniversalAddr(f *testing.F) {
 	})
 }
 
+// FuzzCallbackReply asserts the parser of callback replies — bytes a client
+// sends the server's RPC client — neither panics nor over-allocates.
+func FuzzCallbackReply(f *testing.F) {
+	var ok xdr.Encoder
+	ok.Uint32(cbRecallXID)
+	ok.Uint32(msgReply)
+	ok.Uint32(replyAccepted)
+	ok.Uint32(authNone)
+	ok.Uint32(0)
+	ok.Uint32(acceptSuccess)
+	f.Add(ok.Bytes())
+	f.Add([]byte{})
+	f.Fuzz(func(t *testing.T, record []byte) {
+		parseAcceptedReply(record, cbRecallXID)
+	})
+}
+
 // compoundRecord frames a COMPOUND call as one RPC record body.
 func compoundRecord(xid uint32, args []byte) []byte {
 	var e xdr.Encoder

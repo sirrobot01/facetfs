@@ -131,6 +131,13 @@ func (c *compound) write(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	if stable > fileSync4 {
 		return status(e, nfs4ErrInval)
 	}
+	// A write makes every other client's delegation false; recall before the
+	// data lands. The writer's own delegations are left alone.
+	if c.hasFH {
+		if st := c.s.recallDelegations(c.fh, c.s.state.clientForStateid(other)); st != nfs4OK {
+			return status(e, st)
+		}
+	}
 	f, temporary, st := c.ioState(stateSeq, other, true)
 	if st != nfs4OK {
 		return status(e, st)

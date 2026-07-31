@@ -257,3 +257,178 @@ func TestDelegationExpiresWithLease(t *testing.T) {
 		t.Fatalf("delegation state survived lease expiry: %d, %d", held, byPath)
 	}
 }
+
+// grantDeleg confirms an owner and opens name a second time to obtain a read
+// delegation.
+func grantDeleg(t *testing.T, tc *testClient, clientID uint64, owner, name string) delegOpen {
+	t.Helper()
+	confirmedOpen(t, tc, clientID, owner, name)
+	st, got := openRoot(t, tc, clientID, owner, 3, shareRead, denyNone, name)
+	if st != nfs4OK {
+		t.Fatalf("OPEN status = %d", st)
+	}
+	if got.delegType != openDelegateRead {
+		t.Fatalf("delegation type = %d, want OPEN_DELEGATE_READ", got.delegType)
+	}
+	return got
+}
+
+func waitRecall(t *testing.T, cb *cbNullServer) wireStateid {
+	t.Helper()
+	select {
+	case state := <-cb.recalls:
+		return state
+	case <-time.After(5 * time.Second):
+		t.Fatal("no CB_RECALL arrived")
+		return wireStateid{}
+	}
+}
+
+func TestConflictingOpenRecallsDelegation(t *testing.T) {
+	tc, cb, clientID := delegHarness(t)
+	held := grantDeleg(t, tc, clientID, "owner-a", "hello.txt")
+
+	writer := newTestClientFor(t, tc.s)
+	writerID := setClientIDCallback(writer, "client-w", testCBProgram, "tcp", cb.uaddr())
+	st, _ := openRoot(t, writer, writerID, "owner-w", 1, shareWrite, denyNone, "hello.txt")
+	if st != nfs4ErrDelay {
+		t.Fatalf("conflicting OPEN = %d, want NFS4ERR_DELAY", st)
+	}
+	if got := waitRecall(t, cb); got != held.deleg {
+		t.Fatalf("CB_RECALL stateid = %+v, want %+v", got, held.deleg)
+	}
+
+	if st := tc.delegReturn(t, held.fh, held.deleg); st != nfs4OK {
+		t.Fatalf("DELEGRETURN = %d", st)
+	}
+	st, w := openRoot(t, writer, writerID, "owner-w", 2, shareWrite, denyNone, "hello.txt")
+	if st != nfs4OK {
+		t.Fatalf("retried OPEN = %d, want OK after DELEGRETURN", st)
+	}
+	if w.delegType != openDelegateNone {
+		t.Fatalf("write OPEN got delegation type %d", w.delegType)
+	}
+}
+
+func TestRepeatedConflictSendsOneRecall(t *testing.T) {
+	tc, cb, clientID := delegHarness(t)
+	grantDeleg(t, tc, clientID, "owner-a", "hello.txt")
+
+	writer := newTestClientFor(t, tc.s)
+	writerID := setClientIDCallback(writer, "client-w", testCBProgram, "tcp", cb.uaddr())
+	for seqid := uint32(1); seqid <= 3; seqid++ {
+		if st, _ := openRoot(t, writer, writerID, "owner-w", seqid, shareWrite, denyNone, "hello.txt"); st != nfs4ErrDelay {
+			t.Fatalf("conflicting OPEN = %d, want NFS4ERR_DELAY", st)
+		}
+	}
+	waitRecall(t, cb)
+	select {
+	case extra := <-cb.recalls:
+		t.Fatalf("second CB_RECALL sent: %+v", extra)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+func TestRecallTimeoutRevokes(t *testing.T) {
+	held := recallTimeout
+	recallTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { recallTimeout = held })
+
+	tc, cb, clientID := delegHarness(t)
+	cb.recallMode = "ignore"
+	granted := grantDeleg(t, tc, clientID, "owner-a", "hello.txt")
+
+	writer := newTestClientFor(t, tc.s)
+	writerID := setClientIDCallback(writer, "client-w", testCBProgram, "tcp", cb.uaddr())
+	if st, _ := openRoot(t, writer, writerID, "owner-w", 1, shareWrite, denyNone, "hello.txt"); st != nfs4ErrDelay {
+		t.Fatalf("conflicting OPEN = %d, want NFS4ERR_DELAY", st)
+	}
+	waitRecall(t, cb)
+
+	// The holder never returns; after the recall timeout the conflicting
+	// request proceeds and the delegation is revoked.
+	deadline := time.Now().Add(5 * time.Second)
+	seqid := uint32(2)
+	for {
+		st, _ := openRoot(t, writer, writerID, "owner-w", seqid, shareWrite, denyNone, "hello.txt")
+		if st == nfs4OK {
+			break
+		}
+		if st != nfs4ErrDelay {
+			t.Fatalf("retried OPEN = %d", st)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("conflicting OPEN never proceeded")
+		}
+		seqid++
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	if st, _ := tc.readWith(t, granted.fh, granted.deleg, 8); st != nfs4ErrAdminRevoked {
+		t.Fatalf("READ with revoked delegation = %d, want NFS4ERR_ADMIN_REVOKED", st)
+	}
+	if st := tc.delegReturn(t, granted.fh, granted.deleg); st != nfs4ErrAdminRevoked {
+		t.Fatalf("DELEGRETURN of revoked delegation = %d, want NFS4ERR_ADMIN_REVOKED", st)
+	}
+}
+
+func TestRemoveRecallsHoldersDelegation(t *testing.T) {
+	tc, cb, clientID := delegHarness(t)
+	held := grantDeleg(t, tc, clientID, "owner-a", "hello.txt")
+
+	remove := func() nfsStat {
+		st, d := tc.compound(func(e *xdr.Encoder) uint32 {
+			e.Uint32(opPutRootFH)
+			e.Uint32(opRemove)
+			e.String("hello.txt")
+			return 2
+		})
+		expectOp(t, d, opPutRootFH, nfs4OK)
+		return st
+	}
+	if st := remove(); st != nfs4ErrDelay {
+		t.Fatalf("REMOVE of a delegated file = %d, want NFS4ERR_DELAY", st)
+	}
+	waitRecall(t, cb)
+	if st := tc.delegReturn(t, held.fh, held.deleg); st != nfs4OK {
+		t.Fatalf("DELEGRETURN = %d", st)
+	}
+	if st := remove(); st != nfs4OK {
+		t.Fatalf("retried REMOVE = %d, want OK", st)
+	}
+}
+
+func TestOwnWritesLeaveOwnDelegation(t *testing.T) {
+	tc, cb, clientID := delegHarness(t)
+	held := grantDeleg(t, tc, clientID, "owner-a", "hello.txt")
+
+	// The holder itself opens for write and writes: its cache stays coherent
+	// with its own changes, so nothing is recalled.
+	st, w := openRoot(t, tc, clientID, "owner-b", 1, shareWrite, denyNone, "hello.txt")
+	if st != nfs4OK {
+		t.Fatalf("holder's write OPEN = %d", st)
+	}
+	w.state = confirmOpen(t, tc, w.fh, w.state, 2)
+	st, d := tc.compound(func(e *xdr.Encoder) uint32 {
+		e.Uint32(opPutFH)
+		e.Opaque(w.fh)
+		e.Uint32(opWrite)
+		putStateid(e, w.state)
+		e.Uint64(0)
+		e.Uint32(unstable4)
+		e.Opaque([]byte("fresh"))
+		return 2
+	})
+	expectOp(t, d, opPutFH, nfs4OK)
+	if st != nfs4OK {
+		t.Fatalf("holder's WRITE = %d", st)
+	}
+	select {
+	case got := <-cb.recalls:
+		t.Fatalf("own write recalled own delegation: %+v", got)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if st, _ := tc.readWith(t, held.fh, held.deleg, 8); st != nfs4OK {
+		t.Fatalf("delegation stateid after own write = %d", st)
+	}
+}

@@ -29,6 +29,7 @@ fuzz:
 	go test ./internal/xdr -run '^$$' -fuzz FuzzDecoder -fuzztime $(FUZZTIME)
 	go test ./nfs4 -run '^$$' -fuzz FuzzServeConn -fuzztime $(FUZZTIME)
 	go test ./nfs4 -run '^$$' -fuzz FuzzParseUniversalAddr -fuzztime $(FUZZTIME)
+	go test ./nfs4 -run '^$$' -fuzz FuzzCallbackReply -fuzztime $(FUZZTIME)
 
 clean:
 	rm -f coverage.out coverage.html

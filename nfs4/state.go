@@ -15,11 +15,14 @@ import (
 // Locking: an owner's mutex is taken before the store mutex, never the other
 // way round, and the store mutex is never held across a FileSystem call.
 type stateStore struct {
-	mu        sync.Mutex
-	now       func() time.Time
-	lease     time.Duration
-	epoch     [4]byte
-	lastSweep time.Time
+	mu    sync.Mutex
+	now   func() time.Time
+	lease time.Duration
+	// recallWait is recallTimeout, captured once so tests can shorten it for
+	// one server without racing another's reads.
+	recallWait time.Duration
+	epoch      [4]byte
+	lastSweep  time.Time
 
 	nextClient   uint64
 	nextOther    uint64
@@ -33,8 +36,11 @@ type stateStore struct {
 	locksByPath  map[string][]*lockState
 	delegs       map[[12]byte]*delegation
 	delegsByPath map[string][]*delegation
-	expired      map[[12]byte]time.Time
-	expiredIDs   map[uint64]time.Time
+	// revokedDelegs tombstones delegations taken back from a client that did
+	// not answer a recall, so their later use gets NFS4ERR_ADMIN_REVOKED.
+	revokedDelegs map[[12]byte]time.Time
+	expired       map[[12]byte]time.Time
+	expiredIDs    map[uint64]time.Time
 }
 
 type client struct {
@@ -64,6 +70,11 @@ type delegation struct {
 	seq    uint32
 	client *client
 	path   string
+	// recalling marks a CB_RECALL sent at recallAt, so a second conflicting
+	// request does not send a second recall. The delegation is revoked when
+	// recallTimeout passes without a DELEGRETURN.
+	recalling bool
+	recallAt  time.Time
 }
 
 // owner is an open-owner or lock-owner: the unit of sequence-id discipline
@@ -112,20 +123,22 @@ func (o *openState) stateid() ([12]byte, uint32) { return o.other, o.seq }
 
 func newStateStore(lease time.Duration) *stateStore {
 	st := &stateStore{
-		now:          time.Now,
-		lease:        lease,
-		confirmed:    map[uint64]*client{},
-		unconfirmed:  map[uint64]*client{},
-		byOwner:      map[string]*client{},
-		opens:        map[[12]byte]*openState{},
-		stateOwners:  map[[12]byte]*owner{},
-		byPath:       map[string][]*openState{},
-		locks:        map[[12]byte]*lockState{},
-		locksByPath:  map[string][]*lockState{},
-		delegs:       map[[12]byte]*delegation{},
-		delegsByPath: map[string][]*delegation{},
-		expired:      map[[12]byte]time.Time{},
-		expiredIDs:   map[uint64]time.Time{},
+		now:           time.Now,
+		lease:         lease,
+		recallWait:    recallTimeout,
+		confirmed:     map[uint64]*client{},
+		unconfirmed:   map[uint64]*client{},
+		byOwner:       map[string]*client{},
+		opens:         map[[12]byte]*openState{},
+		stateOwners:   map[[12]byte]*owner{},
+		byPath:        map[string][]*openState{},
+		locks:         map[[12]byte]*lockState{},
+		locksByPath:   map[string][]*lockState{},
+		delegs:        map[[12]byte]*delegation{},
+		delegsByPath:  map[string][]*delegation{},
+		revokedDelegs: map[[12]byte]time.Time{},
+		expired:       map[[12]byte]time.Time{},
+		expiredIDs:    map[uint64]time.Time{},
 	}
 	rand.Read(st.epoch[:])
 	return st
@@ -275,7 +288,7 @@ func (st *stateStore) grantDelegationLocked(path string, o *owner, access uint32
 		}
 	}
 	for _, dl := range st.delegsByPath[path] {
-		if dl.client == c {
+		if dl.client == c || dl.recalling {
 			return nil
 		}
 	}
@@ -299,6 +312,9 @@ func (st *stateStore) returnDelegation(seq uint32, other [12]byte, p string) nfs
 	if _, expired := st.expired[other]; expired {
 		return nfs4ErrExpired
 	}
+	if _, revoked := st.revokedDelegs[other]; revoked {
+		return nfs4ErrAdminRevoked
+	}
 	dl, ok := st.delegs[other]
 	switch {
 	case !ok:
@@ -311,6 +327,35 @@ func (st *stateStore) returnDelegation(seq uint32, other [12]byte, p string) nfs
 	st.dropDelegationLocked(dl)
 	dl.client.lastRenew = st.now()
 	return nfs4OK
+}
+
+// revokeDelegationLocked takes a delegation back from a client that did not
+// return it within the recall timeout. The tombstone answers the client's
+// later use of the stateid with NFS4ERR_ADMIN_REVOKED.
+func (st *stateStore) revokeDelegationLocked(dl *delegation, now time.Time) {
+	st.dropDelegationLocked(dl)
+	st.revokedDelegs[dl.other] = now
+}
+
+// clientForStateid names the client behind a real stateid, or nil for the
+// special stateids and unknown values. Recall decisions use it to leave the
+// caller's own delegations alone.
+func (st *stateStore) clientForStateid(other [12]byte) *client {
+	if other == ([12]byte{}) || other == allOnesOther {
+		return nil
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if o, ok := st.opens[other]; ok {
+		return o.client
+	}
+	if l, ok := st.locks[other]; ok {
+		return l.client
+	}
+	if dl, ok := st.delegs[other]; ok {
+		return dl.client
+	}
+	return nil
 }
 
 func (st *stateStore) dropDelegationLocked(dl *delegation) {
@@ -645,6 +690,9 @@ func (st *stateStore) resolveIOStateid(seq uint32, other [12]byte, path string) 
 	}
 	if _, expired := st.expired[other]; expired {
 		return nil, 0, false, nfs4ErrExpired
+	}
+	if _, revoked := st.revokedDelegs[other]; revoked {
+		return nil, 0, false, nfs4ErrAdminRevoked
 	}
 	o, ok := st.opens[other]
 	if !ok {

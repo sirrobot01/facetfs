@@ -54,13 +54,19 @@ func TestParseUniversalAddr(t *testing.T) {
 	}
 }
 
+const testCBIdent = 7
+
 // cbNullServer is the in-process callback service: a listener that can be
-// told to answer CB_NULL, to stall, or to refuse.
+// told to answer CB_NULL, to stall, or to refuse. Received CB_RECALLs are
+// reported on the recalls channel; recallMode "ignore" swallows them without
+// answering, which is how a client that never returns behaves.
 type cbNullServer struct {
-	t       *testing.T
-	l       net.Listener
-	program uint32
-	mode    string // "answer", "stall", "refuse"
+	t          *testing.T
+	l          net.Listener
+	program    uint32
+	mode       string // "answer", "stall", "refuse"
+	recallMode string // "" or "answer", "ignore"
+	recalls    chan wireStateid
 
 	mu    sync.Mutex
 	conns []net.Conn
@@ -72,7 +78,8 @@ func startCBNullServer(t *testing.T, program uint32, mode string) *cbNullServer 
 	if err != nil {
 		t.Fatal(err)
 	}
-	cb := &cbNullServer{t: t, l: l, program: program, mode: mode}
+	cb := &cbNullServer{t: t, l: l, program: program, mode: mode,
+		recalls: make(chan wireStateid, 8)}
 	go cb.serve()
 	t.Cleanup(cb.close)
 	return cb
@@ -104,41 +111,81 @@ func (cb *cbNullServer) handle(c net.Conn) {
 	if cb.mode == "stall" {
 		return // hold the connection open and never answer
 	}
-	record, err := readRecord(c, 4096)
-	if err != nil {
-		return
-	}
-	d := xdr.NewDecoder(record)
-	xid := d.Uint32()
-	if mtype := d.Uint32(); mtype != msgCall {
-		cb.t.Errorf("callback mtype = %d, want %d", mtype, msgCall)
-	}
-	if vers := d.Uint32(); vers != rpcVersion {
-		cb.t.Errorf("callback rpcvers = %d, want %d", vers, rpcVersion)
-	}
-	if prog := d.Uint32(); prog != cb.program {
-		cb.t.Errorf("callback program = %d, want %d", prog, cb.program)
-	}
-	if vers := d.Uint32(); vers != callbackVersion {
-		cb.t.Errorf("callback version = %d, want %d", vers, callbackVersion)
-	}
-	if proc := d.Uint32(); proc != cbProcNull {
-		cb.t.Errorf("callback proc = %d, want CB_NULL", proc)
-	}
-	e := xdr.NewEncoder(nil)
-	e.Uint32(xid)
-	e.Uint32(msgReply)
-	if cb.mode == "refuse" {
-		e.Uint32(replyDenied)
-		e.Uint32(rejectAuthError)
-		e.Uint32(authBadCred)
-	} else {
+	for {
+		record, err := readRecord(c, 4096)
+		if err != nil {
+			return
+		}
+		d := xdr.NewDecoder(record)
+		xid := d.Uint32()
+		if mtype := d.Uint32(); mtype != msgCall {
+			cb.t.Errorf("callback mtype = %d, want %d", mtype, msgCall)
+		}
+		if vers := d.Uint32(); vers != rpcVersion {
+			cb.t.Errorf("callback rpcvers = %d, want %d", vers, rpcVersion)
+		}
+		if prog := d.Uint32(); prog != cb.program {
+			cb.t.Errorf("callback program = %d, want %d", prog, cb.program)
+		}
+		if vers := d.Uint32(); vers != callbackVersion {
+			cb.t.Errorf("callback version = %d, want %d", vers, callbackVersion)
+		}
+		proc := d.Uint32()
+		d.Uint32()             // cred flavor
+		d.Opaque(maxCredBytes) // cred body
+		d.Uint32()             // verf flavor
+		d.Opaque(maxCredBytes) // verf body
+
+		e := xdr.NewEncoder(nil)
+		e.Uint32(xid)
+		e.Uint32(msgReply)
+		if cb.mode == "refuse" {
+			e.Uint32(replyDenied)
+			e.Uint32(rejectAuthError)
+			e.Uint32(authBadCred)
+			writeRecord(c, e.Bytes())
+			continue
+		}
 		e.Uint32(replyAccepted)
 		e.Uint32(authNone)
 		e.Uint32(0)
 		e.Uint32(acceptSuccess)
+		switch proc {
+		case cbProcNull:
+		case cbProcCompound:
+			d.Opaque(maxTagBytes) // tag
+			if minor := d.Uint32(); minor != 0 {
+				cb.t.Errorf("CB_COMPOUND minorversion = %d", minor)
+			}
+			if ident := d.Uint32(); ident != testCBIdent {
+				cb.t.Errorf("CB_COMPOUND callback_ident = %d, want %d", ident, testCBIdent)
+			}
+			if n := d.Uint32(); n != 1 {
+				cb.t.Errorf("CB_COMPOUND carries %d ops, want 1", n)
+			}
+			if op := d.Uint32(); op != opCBRecall {
+				cb.t.Errorf("CB_COMPOUND op = %d, want CB_RECALL", op)
+			}
+			state := getStateid(d)
+			d.Bool() // truncate
+			d.Opaque(maxFHBytes)
+			if d.Err() != nil {
+				cb.t.Errorf("CB_RECALL decode: %v", d.Err())
+			}
+			cb.recalls <- state
+			if cb.recallMode == "ignore" {
+				continue
+			}
+			e.Uint32(uint32(nfs4OK)) // CB_COMPOUND status
+			e.Opaque(nil)            // tag
+			e.Uint32(1)              // one result
+			e.Uint32(opCBRecall)
+			e.Uint32(uint32(nfs4OK))
+		default:
+			cb.t.Errorf("callback proc = %d", proc)
+		}
+		writeRecord(c, e.Bytes())
 	}
-	writeRecord(c, e.Bytes())
 }
 
 // uaddr renders the listener's address in the universal form SETCLIENTID
@@ -188,7 +235,7 @@ func setClientIDCallback(tc *testClient, name string, program uint32, netid, uad
 		e.Uint32(program)
 		e.String(netid)
 		e.String(uaddr)
-		e.Uint32(7)
+		e.Uint32(testCBIdent)
 		return 1
 	})
 	if st != nfs4OK {

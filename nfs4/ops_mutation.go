@@ -172,6 +172,11 @@ func (c *compound) setAttr(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 			st = nfs4ErrIsDir
 		}
 	}
+	// A size or time change makes other clients' delegations false
+	// (RFC 7530 §10.4.3); a bare mode change does not.
+	if st == nfs4OK && (a.size != nil || a.atime != nil || a.mtime != nil) {
+		st = c.s.recallDelegations(c.fh, c.s.state.clientForStateid(other))
+	}
 	var access uint32
 	if st == nfs4OK {
 		_, access, _, st = c.s.state.resolveIOStateid(stateSeq, other, c.fh)
@@ -292,6 +297,11 @@ func (c *compound) remove(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	if err != nil {
 		return status(e, nameErr(err))
 	}
+	// REMOVE names no client, so every delegation on the path is recalled,
+	// the caller's own included.
+	if st := c.s.recallDelegations(target, nil); st != nfs4OK {
+		return status(e, st)
+	}
 	before := c.changeOfDir(c.fh)
 	// A non-recursive remove refuses a directory holding entries by itself.
 	// Falling back to checking and then calling the recursive RemoveAll would
@@ -383,6 +393,13 @@ func (c *compound) rename(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 	}
 	oldBefore, newBefore := c.changeOfDir(c.saved), c.changeOfDir(c.fh)
 	if oldPath != newPath {
+		// A rename disturbs delegations on either name (RFC 7530 §10.4.3).
+		if st := c.s.recallDelegations(oldPath, nil); st != nfs4OK {
+			return status(e, st)
+		}
+		if st := c.s.recallDelegations(newPath, nil); st != nfs4OK {
+			return status(e, st)
+		}
 		if err := c.s.FileSystem.Rename(c.ctx, oldPath, newPath); err != nil {
 			return status(e, nameErr(err))
 		}
@@ -417,6 +434,11 @@ func (c *compound) link(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 		return status(e, nfs4ErrIsDir)
 	}
 	before := c.changeOfDir(c.fh)
+	// A new link changes the file's link count, which a delegated client
+	// caches with the rest of its attributes.
+	if st := c.s.recallDelegations(c.saved, nil); st != nfs4OK {
+		return status(e, st)
+	}
 	if err := linkfs.Link(c.ctx, c.saved, path.Join(c.fh, name)); err != nil {
 		return status(e, nameErr(err))
 	}

@@ -271,6 +271,13 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 		attrs.size = nil
 		attrs.applied.set(attrSize)
 	}
+	// An open that could change the file recalls other clients' delegations
+	// before any side effect (RFC 7530 §10.4.3).
+	if access&shareWrite != 0 || deny&denyRead != 0 || truncating {
+		if st := c.s.recallDelegations(target, owner.client); st != nfs4OK {
+			return status(e, st)
+		}
+	}
 	flags := openFlags(unionAccess)
 	needOpen := held == nil || held.flag != flags || truncating
 	var replacement *openFile

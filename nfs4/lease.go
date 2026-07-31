@@ -32,6 +32,18 @@ func (st *stateStore) sweepExpired() {
 			delete(st.expiredIDs, id)
 		}
 	}
+	for other, revokedAt := range st.revokedDelegs {
+		if !now.Before(revokedAt.Add(st.lease)) {
+			delete(st.revokedDelegs, other)
+		}
+	}
+	// A recall the holder never answered forfeits the delegation even when no
+	// conflicting request is left waiting on it.
+	for _, dl := range st.delegs {
+		if dl.recalling && !now.Before(dl.recallAt.Add(st.recallWait)) {
+			st.revokeDelegationLocked(dl, now)
+		}
+	}
 	for id, client := range st.unconfirmed {
 		if !now.Before(client.lastRenew.Add(st.lease)) {
 			delete(st.unconfirmed, id)
