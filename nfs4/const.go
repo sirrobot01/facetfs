@@ -208,7 +208,6 @@ const fh4VolatileAny = 2
 const (
 	maxCompoundOps = 128
 	maxTagBytes    = 1024
-	maxFragment    = 1 << 20
 	maxInflight    = 16
 	maxNameBytes   = 255
 	maxLinkData    = 4096

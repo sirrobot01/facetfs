@@ -245,7 +245,7 @@ func TestCompoundGarbageArgs(t *testing.T) {
 func TestOversizedFragmentDropsConnection(t *testing.T) {
 	c := testConn(t)
 	var marker [4]byte
-	binary.BigEndian.PutUint32(marker[:], 1<<31|(maxFragment+1))
+	binary.BigEndian.PutUint32(marker[:], 1<<31|uint32((&Server{}).requestCap()+1))
 	if _, err := c.Write(marker[:]); err != nil {
 		t.Fatal(err)
 	}

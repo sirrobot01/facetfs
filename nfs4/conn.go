@@ -21,9 +21,10 @@ type authSysCred struct {
 	machine  string
 }
 
-// readRecord reassembles one RPC record (RFC 5531 §11). Fragment and total
-// sizes are capped; a peer exceeding them loses the connection because a
-// reply cannot be correlated to an unread request.
+// readRecord reassembles one RPC record (RFC 5531 §11). The record is capped
+// at maxTotal, which the server derives from its write limit so that a WRITE
+// of the advertised maxwrite always fits; a peer exceeding it loses the
+// connection, because a reply cannot be correlated to an unread request.
 func readRecord(r io.Reader, maxTotal int) ([]byte, error) {
 	var record []byte
 	for {
@@ -37,7 +38,7 @@ func readRecord(r io.Reader, maxTotal int) ([]byte, error) {
 		m := binary.BigEndian.Uint32(marker[:])
 		last := m&(1<<31) != 0
 		size := int(m & (1<<31 - 1))
-		if size > maxFragment || len(record)+size > maxTotal {
+		if len(record)+size > maxTotal {
 			return nil, errFraming
 		}
 		record = append(record, make([]byte, size)...)
