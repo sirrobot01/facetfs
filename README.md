@@ -15,7 +15,7 @@ package is independent. Import only what you use.
 | `webdav` | WebDAV (HTTP)  | an `http.Server` and auth middleware   | usable      |
 | `sftp`   | SFTP           | an SSH server and an accepted channel  | usable      |
 | `nfs4`   | NFSv4.0        | a `net.Listener`                       | usable      |
-| `smb`    | SMB2/SMB3      | a `net.Listener`                       | planned     |
+| `smb`    | SMB2/SMB3      | a `net.Listener` and NT-hash lookup    | experimental |
 
 ## The filesystem interface
 
@@ -51,14 +51,14 @@ Optional interfaces unlock protocol features:
 | Interface   | Methods                    | Unlocks                                  |
 | ----------- | -------------------------- | ---------------------------------------- |
 | `SymlinkFS` | `Symlink, Readlink, Lstat` | symlinks over SFTP, WebDAV, and NFS      |
-| `SetStatFS` | `Chmod, Chtimes, Truncate` | SFTP `setstat`, NFS `SETATTR`            |
-| `StatVFSFS` | `StatVFS`                  | SFTP `statvfs`, NFS space attributes     |
+| `SetStatFS` | `Chmod, Chtimes, Truncate` | SFTP `setstat`, NFS `SETATTR`, SMB `SET_INFO` |
+| `StatVFSFS` | `StatVFS`                  | SFTP `statvfs`, NFS and SMB space attributes |
 | `LinkFS`    | `Link`                     | NFS `LINK` and the `link_support` attribute |
-| `RemoveFS`  | `Remove`                   | removing a directory without deleting a subtree |
+| `RemoveFS`  | `Remove`                   | safe directory removal over WebDAV and SMB |
 
 A `File` may also implement `io.ReaderAt` and `io.WriterAt`, which let SFTP and
-NFS serve positioned reads and writes in parallel, and `Sync() error`, which
-backs NFS `COMMIT` and stable writes.
+NFS and SMB serve positioned reads and writes in parallel, and `Sync() error`,
+which backs NFS `COMMIT`, SMB `FLUSH`, and stable writes.
 
 A filesystem without an interface still works. The protocol packages refuse
 only the requests that need it.
@@ -105,6 +105,31 @@ if err := server.Serve(ctx, channel); err != nil {
 
 See [examples/sftp](./examples/sftp) for a complete program with host keys and
 `authorized_keys` verification.
+
+## SMB2/SMB3
+
+`smb.Server` serves one SMB share over a listener you bind. The application
+looks up an NT hash for each user; the package performs NTLMv2, derives the
+session key, and signs the session.
+
+```go
+server := &smb.Server{
+    FileSystem:    served,
+    Authenticator: credentials, // implements smb.Authenticator
+    ShareName:     "share",
+}
+listener, err := net.Listen("tcp", "127.0.0.1:1445")
+if err != nil {
+    log.Fatal(err)
+}
+log.Fatal(server.Serve(ctx, listener))
+```
+
+The package serves SMB 2.1 and 3.1.1. Signing prevents undetected changes but
+does not hide file contents; SMB encryption is not implemented, so use a
+trusted network. Byte-range locks are advisory. The implementation remains
+experimental until its Windows, macOS, and Linux client acceptance matrix has
+passed. See [examples/smb](./examples/smb).
 
 ## NFSv4.0
 
@@ -163,6 +188,20 @@ go run ./examples/sftp \
 sftp -P 2022 127.0.0.1
 ```
 
+Run the SMB example on an unprivileged loopback port:
+
+```sh
+mkdir -p ./shared
+FACETFS_USER=demo FACETFS_PASSWORD=change-me \
+  go run ./examples/smb -root ./shared
+
+sudo mount -t cifs -o vers=3.1.1,port=1445,user=demo \
+  //127.0.0.1/share /mnt/facetfs
+```
+
+Explorer normally connects only to TCP port 445; bind the example to `:445`
+on a test host when running the Windows acceptance profile.
+
 The examples are starting points. Production applications must provide durable
 host keys, TLS, authorization policy, timeouts, and logging.
 
@@ -173,7 +212,16 @@ The project requires Go 1.26 and builds without CGO.
 ```sh
 make check
 make race
+make bench-protocols
 ```
+
+`make bench-protocols` compares warm metadata, read, and overwrite operations
+over NFSv4, SFTP, and WebDAV on loopback. All three serve the same in-memory
+filesystem, and connection setup, SSH, TLS, and authentication are excluded.
+The results therefore show steady-state protocol-path overhead, not disk or
+WAN performance. Read and write rows report throughput as well as latency;
+run with `-count=5` and compare medians before drawing conclusions from small
+differences.
 
 ## Goals
 
