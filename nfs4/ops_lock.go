@@ -392,7 +392,12 @@ func (c *compound) lock(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 		if conflictState, held := state.lockConflictLocked(c.fh, lockOwner, rng); conflictState != nil {
 			return encodeDenied(result, conflictState, held)
 		}
-		locked.ranges = setLockRange(locked.ranges, rng)
+		// Disjoint ranges accumulate, so an owner's set is bounded.
+		ranges := setLockRange(locked.ranges, rng)
+		if len(ranges) > maxLockRanges {
+			return status(result, nfs4ErrResource)
+		}
+		locked.ranges = ranges
 		locked.seq++
 		locked.client.lastRenew = state.now()
 		result.Uint32(uint32(nfs4OK))

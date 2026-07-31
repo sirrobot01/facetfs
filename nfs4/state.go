@@ -44,6 +44,9 @@ type client struct {
 	lastRenew   time.Time
 	openOwners  map[string]*owner
 	lockOwners  map[string]*owner
+	// opens counts the client's live open states. Each holds a file open, so
+	// this is what bounds its share of the file descriptors.
+	opens int
 }
 
 // owner is an open-owner or lock-owner: the unit of sequence-id discipline
@@ -211,6 +214,7 @@ func (st *stateStore) releaseLocked(c *client) []*openFile {
 			files = append(files, o.file)
 		}
 	}
+	c.opens = 0
 	for other, o := range st.stateOwners {
 		if o.client == c {
 			delete(st.stateOwners, other)
@@ -302,6 +306,9 @@ func (st *stateStore) ownerOf(clientID uint64, key string) (*owner, nfsStat) {
 	c.lastRenew = st.now()
 	o, ok := c.openOwners[key]
 	if !ok {
+		if len(c.openOwners) >= maxOwnersPerClient {
+			return nil, nfs4ErrResource
+		}
 		o = &owner{key: key, client: c, fresh: true}
 		c.openOwners[key] = o
 	}
@@ -321,6 +328,9 @@ func (st *stateStore) lockOwnerOf(clientID uint64, key string) (*owner, nfsStat)
 	c.lastRenew = st.now()
 	o, ok := c.lockOwners[key]
 	if !ok {
+		if len(c.lockOwners) >= maxOwnersPerClient {
+			return nil, nfs4ErrResource
+		}
 		o = &owner{key: key, client: c, fresh: true}
 		c.lockOwners[key] = o
 	}

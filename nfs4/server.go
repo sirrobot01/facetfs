@@ -52,6 +52,7 @@ type Server struct {
 	supported bitmap
 	state     *stateStore
 	dirs      *dirCache
+	exclusive *exclusiveCreates
 	sweepMu   sync.Mutex
 	sweepRefs int
 	sweepStop chan struct{}
@@ -75,6 +76,7 @@ func (s *Server) init() error {
 		s.supported = s.supportedAttrs()
 		s.state = newStateStore(s.lease())
 		s.dirs = newDirCache(s.state.now, s.lease(), maxCachedDirEntries)
+		s.exclusive = newExclusiveCreates(s.state.now, s.lease(), maxExclusiveCreates)
 		if _, err := rand.Read(s.verifier[:]); err != nil {
 			s.initErr = err
 		}

@@ -47,3 +47,19 @@ jobs:
         env:
           CGO_ENABLED: "0"
         run: go build -trimpath ./...
+
+  fuzz:
+    name: Fuzz smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Short runs catch a regression that makes a decoder panic or a
+      # connection hang. Long campaigns belong in `make fuzz`.
+      - name: XDR primitives
+        run: go test ./internal/xdr -run '^$' -fuzz FuzzDecoder -fuzztime 60s
+      - name: NFS connections
+        run: go test ./nfs4 -run '^$' -fuzz FuzzServeConn -fuzztime 120s

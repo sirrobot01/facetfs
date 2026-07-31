@@ -145,6 +145,7 @@ func (c *compound) open(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 		createMode uint32
 		createAttr bitmap
 		createVals []byte
+		createVerf [8]byte
 		name       string
 		argStatus  = nfs4OK
 	)
@@ -155,7 +156,7 @@ func (c *compound) open(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 			createAttr = decodeBitmap(d)
 			createVals = d.Opaque(uint32(c.s.requestCap()))
 		case createExclusive:
-			d.OpaqueFixed(8) // createverf
+			copy(createVerf[:], d.OpaqueFixed(8))
 		default:
 			argStatus = nfs4ErrInval
 		}
@@ -185,11 +186,11 @@ func (c *compound) open(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 		if argStatus != nfs4OK {
 			return status(result, argStatus)
 		}
-		return c.openWith(result, o, access, deny, openType, createMode, createAttr, createVals, claim, name)
+		return c.openWith(result, o, access, deny, openType, createMode, createAttr, createVals, createVerf, claim, name)
 	})
 }
 
-func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType, createMode uint32, attrMask bitmap, attrVals []byte, claim uint32, name string) nfsStat {
+func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType, createMode uint32, attrMask bitmap, attrVals []byte, createVerf [8]byte, claim uint32, name string) nfsStat {
 	switch {
 	case access == 0 || access&^uint32(shareBoth) != 0, deny&^uint32(denyBoth) != 0:
 		return status(e, nfs4ErrInval)
@@ -198,8 +199,6 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 	case claim == claimPrevious:
 		return status(e, nfs4ErrNoGrace)
 	case claim != claimNull:
-		return status(e, nfs4ErrNotSupp)
-	case createMode == createExclusive:
 		return status(e, nfs4ErrNotSupp)
 	}
 	if st := c.dirFH(); st != nfs4OK {
@@ -224,6 +223,13 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 		return status(e, nfs4ErrNoEnt)
 	}
 	if openType == openCreate && createMode == createGuarded && exists {
+		return status(e, nfs4ErrExist)
+	}
+	// An exclusive create that names an existing file is only allowed when it
+	// is a retransmission of the create that made it, which the verifier
+	// identifies (RFC 7530 §16.18.4).
+	if openType == openCreate && createMode == createExclusive && exists &&
+		!c.s.exclusive.matches(target, createVerf) {
 		return status(e, nfs4ErrExist)
 	}
 	if exists {
@@ -265,7 +271,9 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 		openFlags := flags
 		if openType == openCreate {
 			openFlags |= os.O_CREATE
-			if createMode == createGuarded {
+			// An exclusive create that reached here either found nothing or
+			// is a retransmission, so O_EXCL applies only to the first.
+			if createMode == createGuarded || createMode == createExclusive && !exists {
 				openFlags |= os.O_EXCL
 			}
 		}
@@ -293,12 +301,16 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 			if replacement != nil {
 				replacement.Close()
 			}
-			if !exists && createMode == createGuarded {
+			if !exists && (createMode == createGuarded || createMode == createExclusive) {
 				_ = c.s.FileSystem.RemoveAll(c.ctx, target)
+				c.s.exclusive.forget(target)
 			}
 			return status(e, st)
 		}
 		attrs.mode = createdMode
+		if createMode == createExclusive {
+			c.s.exclusive.record(target, createVerf)
+		}
 	}
 
 	state.mu.Lock()
@@ -312,6 +324,13 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 	}
 	var old *openFile
 	if held == nil {
+		if owner.client.opens >= maxOpensPerClient {
+			state.mu.Unlock()
+			if replacement != nil {
+				replacement.Close()
+			}
+			return status(e, nfs4ErrResource)
+		}
 		held = &openState{
 			other: state.newOther(), seq: 1, client: owner.client, owner: owner,
 			path: target, access: unionAccess, deny: unionDeny, file: replacement, flag: flags,
@@ -319,6 +338,7 @@ func (c *compound) openWith(e *xdr.Encoder, owner *owner, access, deny, openType
 		state.opens[held.other] = held
 		state.stateOwners[held.other] = owner
 		state.byPath[target] = append(state.byPath[target], held)
+		owner.client.opens++
 	} else {
 		held.seq++
 		held.access, held.deny = unionAccess, unionDeny
@@ -496,6 +516,7 @@ func (c *compound) close(d *xdr.Decoder, e *xdr.Encoder) nfsStat {
 		}
 		state.removeEmptyLocksForOpenLocked(held)
 		delete(state.opens, other)
+		held.client.opens--
 		state.removePathLocked(held)
 		// Only the newest closed stateid is needed to route an exact replay
 		// to this owner's one-slot cache.

@@ -212,6 +212,14 @@ const (
 	// maxCachedDirEntries bounds the entries held across all the directory
 	// listings clients are paging through.
 	maxCachedDirEntries = 1 << 17
+	// One client's state is bounded so that a client cannot grow the server
+	// without limit. Each open also holds a file open, so the bound on opens
+	// is what keeps a client from exhausting file descriptors.
+	maxOpensPerClient  = 1 << 12
+	maxOwnersPerClient = 1 << 12
+	maxLockRanges      = 1 << 12
+	// maxExclusiveCreates bounds the remembered exclusive-create verifiers.
+	maxExclusiveCreates = 1 << 12
 	maxNameBytes        = 255
 	maxLinkData         = 4096
 	maxCredBytes        = 400

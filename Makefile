@@ -1,4 +1,6 @@
-.PHONY: all build check fmt test race vet clean
+.PHONY: all build check fmt test race vet bench fuzz clean
+
+FUZZTIME ?= 5m
 
 all: check
 
@@ -18,6 +20,14 @@ test:
 
 race:
 	go test -race ./...
+
+bench:
+	go test ./internal/xdr ./nfs4 -run '^$$' -bench . -benchmem
+
+# Longer campaigns than CI runs. Set FUZZTIME to change the budget per target.
+fuzz:
+	go test ./internal/xdr -run '^$$' -fuzz FuzzDecoder -fuzztime $(FUZZTIME)
+	go test ./nfs4 -run '^$$' -fuzz FuzzServeConn -fuzztime $(FUZZTIME)
 
 clean:
 	rm -f coverage.out coverage.html

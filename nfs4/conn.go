@@ -38,7 +38,10 @@ func readRecord(r io.Reader, maxTotal int) ([]byte, error) {
 		m := binary.BigEndian.Uint32(marker[:])
 		last := m&(1<<31) != 0
 		size := int(m & (1<<31 - 1))
-		if len(record)+size > maxTotal {
+		// The fragment is checked on its own before the running total: on a
+		// 32-bit platform the sum of a large fragment and what is already
+		// held would overflow and let the allocation through.
+		if size > maxTotal || len(record)+size > maxTotal {
 			return nil, errFraming
 		}
 		record = append(record, make([]byte, size)...)
