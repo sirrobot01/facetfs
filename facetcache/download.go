@@ -107,7 +107,11 @@ func (g *dlGroup) ensureLocked(pos, target int64, probe bool) {
 	g.dls = live
 	window := max(int64(4<<20), g.it.f.cache.chunkSize()/2)
 	for _, dl := range g.dls {
-		if start, off := dl.span(); pos >= start && pos < off+window {
+		// Reuse tests the frontier, not the covered span: every caller just
+		// observed a miss at pos, so a downloader whose frontier already
+		// passed pos cannot satisfy it — punch-behind may have evicted
+		// inside [start, offset) after the bytes were fetched.
+		if off := dl.frontier(); pos >= off && pos < off+window {
 			dl.extend(target)
 			return
 		}
@@ -122,7 +126,6 @@ func (g *dlGroup) ensureLocked(pos, target int64, probe bool) {
 	dl := &downloader{
 		g:      g,
 		probe:  probe,
-		start:  pos,
 		offset: pos,
 		target: target,
 		chunk:  chunk,
@@ -270,7 +273,6 @@ type downloader struct {
 	kick  chan struct{}
 
 	mu      sync.Mutex
-	start   int64
 	offset  int64
 	target  int64
 	stopped bool
@@ -283,10 +285,10 @@ type downloader struct {
 	buf     []byte
 }
 
-func (dl *downloader) span() (start, offset int64) {
+func (dl *downloader) frontier() int64 {
 	dl.mu.Lock()
 	defer dl.mu.Unlock()
-	return dl.start, dl.offset
+	return dl.offset
 }
 
 func (dl *downloader) done() bool {

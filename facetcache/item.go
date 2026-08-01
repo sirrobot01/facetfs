@@ -188,6 +188,12 @@ func (it *item) ensureLoaded(st fs.FileInfo) error {
 	if err != nil {
 		return err
 	}
+	// Sparse marking matters only on Windows, where a non-sparse NTFS file
+	// zero-fills everything below a far-offset write. A filesystem that
+	// cannot (FAT) still caches correctly, it just allocates in full.
+	if err := markSparse(fd); err != nil {
+		it.f.cache.logf(fmt.Errorf("facetcache: %s: mark sparse: %w", it.name, err))
+	}
 	it.fd = fd
 	it.size = st.Size()
 	it.fpr = fingerprint(st)

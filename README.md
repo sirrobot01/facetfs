@@ -191,8 +191,8 @@ Writes go through: the backend must acknowledge a write before the cache
 stores it. The wrapper exposes exactly the optional interfaces the backend
 implements, and cached files keep `io.ReaderAt`, so servers keep their
 parallel read paths. A janitor bounds the cache by size (`MaxBytes`) and age
-(`MaxAge`); on Linux it also punches holes behind the read head of open
-streams when whole-file eviction cannot reach the budget.
+(`MaxAge`); on Linux, macOS, and Windows it also punches holes behind the
+read head of open streams when whole-file eviction cannot reach the budget.
 
 Do not cache a backend that something else mutates. The cache invalidates on
 its own mutations only; an external write serves stale attributes until the

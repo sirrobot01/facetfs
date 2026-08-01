@@ -234,7 +234,15 @@ func (j *janitor) punchItem(it *item) {
 			punch = append(punch, rng{r.pos, cut - r.pos})
 		}
 	}
+	punched := false
 	for _, r := range punch {
+		// Align inward where the platform requires block-aligned punches.
+		// Shrinking is the safe direction: sub-block edges stay cached
+		// rather than being deallocated while still claimed.
+		r = alignPunch(r)
+		if r.size <= 0 {
+			continue
+		}
 		if err := punchHole(it.fd, r.pos, r.size); err != nil {
 			j.f.cache.logf(fmt.Errorf("facetcache: %s: punch: %w", it.name, err))
 			return
@@ -244,10 +252,22 @@ func (j *janitor) punchItem(it *item) {
 		it.rs.remove(r)
 		it.f.cachedBytes.Add(-r.size)
 		it.f.punchedBytes.Add(uint64(r.size))
+		punched = true
 	}
-	if len(punch) > 0 {
+	if punched {
 		it.dirty.Store(true)
 	}
+}
+
+// alignPunch shrinks r to punchAlign boundaries. On platforms with
+// punchAlign == 1 the compiler removes the arithmetic.
+func alignPunch(r rng) rng {
+	if punchAlign == 1 {
+		return r
+	}
+	pos := (r.pos + punchAlign - 1) / punchAlign * punchAlign
+	end := r.end() / punchAlign * punchAlign
+	return rng{pos, end - pos}
 }
 
 // load seeds the index and the byte accounting from the metadata tree, and

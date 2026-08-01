@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !darwin && !windows
 
 package facetcache
 
@@ -9,4 +9,8 @@ import "os"
 // overshoot.
 const punchSupported = false
 
+const punchAlign = 1
+
 func punchHole(f *os.File, off, size int64) error { return nil }
+
+func markSparse(f *os.File) error { return nil }
