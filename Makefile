@@ -22,7 +22,7 @@ race:
 	go test -race ./...
 
 bench:
-	go test ./internal/xdr ./nfs4 ./smb -run '^$$' -bench . -benchmem
+	go test ./internal/xdr ./nfs4 ./smb ./facetcache -run '^$$' -bench . -benchmem
 
 # Compare warm, end-to-end protocol operations over loopback and MemFS.
 bench-protocols:

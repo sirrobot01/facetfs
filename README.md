@@ -17,6 +17,9 @@ package is independent. Import only what you use.
 | `nfs4`   | NFSv4.0        | a `net.Listener`                       | usable      |
 | `smb`    | SMB2/SMB3      | a `net.Listener` and NT-hash lookup    | experimental |
 
+The `facetcache` package is not a protocol. It wraps a slow `FileSystem` and
+serves reads from local disk, so every protocol package benefits at once.
+
 ## The filesystem interface
 
 The root package defines one path-based contract. Implement it once. Serve it
@@ -156,6 +159,48 @@ behind your own authentication boundary. Filehandles and protocol state do
 not survive a restart, and byte-range locks are advisory. Read delegations
 are off by default and safe only when the NFS server is the only writer. See
 [examples/nfs](./examples/nfs).
+
+## Caching
+
+`facetcache.Cache` wraps a slow backend — HTTP, S3, a debrid service — and
+serves reads from local disk. Compose it between the backend and a protocol
+server:
+
+```go
+cache := &facetcache.Cache{
+    Backend: backend,            // any facetfs.FileSystem
+    Dir:     "/var/cache/facet", // the cache owns this directory
+}
+fsys, err := cache.FileSystem()
+if err != nil {
+    log.Fatal(err)
+}
+defer cache.Close()
+srv := &nfs4.Server{FileSystem: fsys}
+```
+
+The wrapper keeps two caches. An attribute cache answers `Stat` and `Lstat`
+from memory with a short TTL; NFS costs several stats per read, so this cache
+matters more than the bytes against a high-latency backend. A content cache
+stores file bytes in one sparse file per object, tracks exactly which ranges
+are present, fills misses from the backend with read-ahead, and deduplicates
+concurrent fetches. Content persists across restarts and is validated against
+the backend by a size and mtime fingerprint.
+
+Writes go through: the backend must acknowledge a write before the cache
+stores it. The wrapper exposes exactly the optional interfaces the backend
+implements, and cached files keep `io.ReaderAt`, so servers keep their
+parallel read paths. A janitor bounds the cache by size (`MaxBytes`) and age
+(`MaxAge`); on Linux it also punches holes behind the read head of open
+streams when whole-file eviction cannot reach the budget.
+
+Do not cache a backend that something else mutates. The cache invalidates on
+its own mutations only; an external write serves stale attributes until the
+TTL expires and stale content until a cold open sees the fingerprint change.
+
+A warm read costs the same as a direct `pread` and allocates nothing. A warm
+`Stat` is a map lookup. Do not wrap a local directory: the kernel page cache
+already serves those reads, and a disk cache in front of a disk is overhead.
 
 ## Examples
 
