@@ -1,5 +1,10 @@
 # FacetFS
 
+[![CI](https://github.com/sirrobot01/facetfs/actions/workflows/ci.yml/badge.svg)](https://github.com/sirrobot01/facetfs/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/sirrobot01/facetfs.svg)](https://pkg.go.dev/github.com/sirrobot01/facetfs)
+[![Release](https://img.shields.io/github/v/release/sirrobot01/facetfs)](https://github.com/sirrobot01/facetfs/releases)
+[![License: MIT](https://img.shields.io/github/license/sirrobot01/facetfs)](./LICENSE)
+
 **Embeddable file-protocol handlers for Go.**
 
 FacetFS is a set of thin protocol packages in the style of
@@ -162,7 +167,7 @@ are off by default and safe only when the NFS server is the only writer. See
 
 ## Caching
 
-`facetcache.Cache` wraps a slow backend — HTTP, S3, a debrid service — and
+`facetcache.Cache` wraps a slow backend — HTTP, S3 and
 serves reads from local disk. Compose it between the backend and a protocol
 server:
 

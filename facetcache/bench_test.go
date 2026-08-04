@@ -112,7 +112,7 @@ func BenchmarkWarmOpenClose(b *testing.B) {
 }
 
 // slowFS injects backend latency so the cached-vs-uncached gap is visible
-// end to end, the shape of a debrid or S3 backend behind facet.
+// end to end, the shape of an http or S3 backend behind facet.
 type slowFS struct {
 	facetfs.FileSystem
 	delay time.Duration
